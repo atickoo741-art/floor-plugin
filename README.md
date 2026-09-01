@@ -11,7 +11,13 @@ several agents working on one objective, all visible to each other.
 /plugin install floor@floor
 ```
 
-Nothing else — no clone, no npm, no environment to set.
+**You need Node.js 20 or newer** — `node --version` to check, and
+`brew install node` or <https://nodejs.org> if you have none. Claude Code
+itself does not need Node, so it is entirely possible to have one and not the
+other; this plugin runs a small server on your machine and that server needs a
+runtime. Restart Claude Code after installing it.
+
+Nothing else — no clone, no npm, no environment to set, no Floor account.
 
 ## Use
 

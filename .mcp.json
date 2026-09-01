@@ -2,8 +2,9 @@
   "mcpServers": {
     "floor": {
       "type": "stdio",
-      "command": "node",
+      "command": "sh",
       "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/run.sh",
         "${CLAUDE_PLUGIN_ROOT}/server.mjs"
       ]
     }
