@@ -38880,13 +38880,23 @@ function writeIntentFromTool(toolName, input, cwd, root) {
 // packages/plugin/src/control.mjs
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
+import { basename, dirname as dirname2 } from "node:path";
+import { fileURLToPath } from "node:url";
 var run2 = promisify2(execFile2);
+var HERE = dirname2(fileURLToPath(import.meta.url));
+var ROOT = basename(HERE) === "src" ? dirname2(HERE) : HERE;
+var SHIM = "git-credential";
+var isOurs = (cmd) => cmd.includes(ROOT) || cmd.includes(SHIM);
 async function killRunningTools(rootPid) {
-  const { stdout } = await run2("ps", ["-eo", "pid,ppid"], { maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await run2("ps", ["-eo", "pid,ppid,command"], { maxBuffer: 8 * 1024 * 1024 });
   const kids = /* @__PURE__ */ new Map();
+  const command = /* @__PURE__ */ new Map();
   for (const line of stdout.split("\n").slice(1)) {
-    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]), ppid = Number(m[2]);
     if (!pid || !ppid) continue;
+    command.set(pid, m[3]);
     if (!kids.has(ppid)) kids.set(ppid, []);
     kids.get(ppid).push(pid);
   }
@@ -38898,7 +38908,9 @@ async function killRunningTools(rootPid) {
     }
     return out;
   };
-  const targets = leaves(rootPid).filter((p) => p !== process.pid);
+  const targets = leaves(rootPid).filter(
+    (p) => p !== process.pid && !isOurs(command.get(p) ?? "")
+  );
   for (const t of targets) {
     try {
       process.kill(t, "SIGTERM");
@@ -39033,15 +39045,15 @@ import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify3 } from "node:util";
 import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname2, join as join3 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname as dirname3, join as join3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var run3 = promisify3(execFile3);
-var HERE = dirname2(fileURLToPath(import.meta.url));
+var HERE2 = dirname3(fileURLToPath2(import.meta.url));
 var HELPER = join3(paths.DIR, "git-credential");
 var REPOS = process.env.FLOOR_REPOS ?? join3(homedir3(), "Floor");
 function installHelper() {
-  const credential = join3(HERE, "credential.mjs");
-  const runsh = [join3(HERE, "bin", "run.sh"), join3(HERE, "..", "bin", "run.sh")].find((p) => existsSync2(p));
+  const credential = join3(HERE2, "credential.mjs");
+  const runsh = [join3(HERE2, "bin", "run.sh"), join3(HERE2, "..", "bin", "run.sh")].find((p) => existsSync2(p));
   if (!runsh || !existsSync2(credential)) return null;
   mkdirSync3(paths.DIR, { recursive: true, mode: 448 });
   writeFileSync2(
@@ -39132,7 +39144,7 @@ async function ensureCheckout(fullName, branch) {
   let fresh = false;
   if (!existsSync2(join3(dir, ".git"))) {
     if (existsSync2(dir)) throw new Error(`${dir} exists and is not a git repository`);
-    mkdirSync3(dirname2(dir), { recursive: true });
+    mkdirSync3(dirname3(dir), { recursive: true });
     await git2(["clone", ...cfg, "--no-tags", `https://github.com/${fullName}.git`, dir]);
     fresh = true;
   } else {
@@ -39220,6 +39232,13 @@ var here = {
   /** Items 358-360: what the room has asked of this agent, not yet acted on. */
   stopped: null,
   paused: false,
+  /**
+   * Whether the person at this terminal has been told about the current
+   * pause. Parking a hook stops the agent dead but says nothing while it
+   * does — "when it actually pauses it doesn't tell at all" — so the first
+   * hook after a pause carries the notice and the ones after it park.
+   */
+  pauseSaid: false,
   /**
    * Directions the owner has cleared, waiting for the next tool boundary.
    * Nothing reaches this list that the database did not say could.
@@ -39702,6 +39721,10 @@ async function ingest(line, conn) {
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
     if (here.stopped) return { systemMessage: `Floor \u2014 ${here.stopped}` };
     if (here.paused) {
+      if (!here.pauseSaid) {
+        here.pauseSaid = true;
+        return { systemMessage: `Floor \u2014 ${PAUSED_NOTICE}` };
+      }
       const why = await holdWhilePaused(conn);
       if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
     }
@@ -39715,6 +39738,7 @@ async function ingest(line, conn) {
       news.push(
         "This agent is paused from the room, so nothing here will run. Unpause it in the room and say that again."
       );
+      return { decision: "block", reason: `Floor \u2014 ${news.join(" ")}` };
     }
     return news.length ? { systemMessage: `Floor \u2014 ${news.join(" ")}` } : {};
   }
@@ -39814,10 +39838,22 @@ function holdWhilePaused(conn) {
     }
   });
 }
+var PAUSED_NOTICE = "The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else.";
 var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
 async function guardWrite(payload, conn) {
   if (here.stopped) return halt(here.stopped);
   if (here.paused) {
+    if (!here.pauseSaid) {
+      here.pauseSaid = true;
+      return {
+        systemMessage: `Floor \u2014 ${PAUSED_NOTICE}`,
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `Floor: ${PAUSED_NOTICE}`
+        }
+      };
+    }
     const why = await holdWhilePaused(conn);
     if (why !== "resumed") return halt(holdEnded(why));
   }
@@ -40124,6 +40160,7 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "pause") {
     here.paused = true;
+    here.pauseSaid = false;
     here.announce.push("The room paused this agent, interrupting whatever it was running.");
     const killed = await killRunningTools(process.ppid);
     debug(`pause: interrupted ${killed.length} running process(es)`);
@@ -40131,6 +40168,7 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "resume") {
     here.paused = false;
+    here.pauseSaid = false;
     here.stopped = null;
     here.announce.push("The room unpaused this agent; it carries on from where it stopped.");
     releaseHolds("resumed");
