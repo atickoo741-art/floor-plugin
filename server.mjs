@@ -39056,6 +39056,16 @@ var here = {
   pendingDirections: [],
   /** Written but not yet decided: seq → text. Never delivered from here. */
   awaitingApproval: /* @__PURE__ */ new Map(),
+  /**
+   * One-off things to tell the agent at the next tool boundary.
+   *
+   * Not directions — nobody in the room wrote these and they steer nothing.
+   * They are for the handful of moments when something about this terminal
+   * changes while it is sitting idle and the person would otherwise have to
+   * guess: chiefly being let into a room, which happens minutes later and by
+   * somebody else.
+   */
+  notices: [],
   /** Items 365-366: the thinnest honest handover — what it actually said and did. */
   lastSaid: null,
   lastDoing: null,
@@ -39174,6 +39184,8 @@ async function leftRoom(reason) {
   here.paused = false;
   here.pendingDirections.length = 0;
   here.awaitingApproval.clear();
+  here.notices.length = 0;
+  watchingCode = null;
   forgetRoom();
   process.stderr.write(`floor: ${reason}
 `);
@@ -39470,13 +39482,18 @@ ${body}
 ${FENCE}
 `;
   };
+  const notices = () => {
+    if (!here.notices.length) return null;
+    return here.notices.splice(0, here.notices.length).join("\n\n");
+  };
   const allow = (extra) => {
     const note = directions();
-    if (!note && !extra) return {};
+    const news = notices();
+    if (!note && !extra && !news) return {};
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        additionalContext: [extra, note].filter(Boolean).join("\n\n")
+        additionalContext: [extra, news, note].filter(Boolean).join("\n\n")
       }
     };
   };
@@ -39748,6 +39765,55 @@ async function onRoomEvent(row) {
     debug(`direction ${c.seq} rejected`);
   }
 }
+var APPROVAL_EVERY = 4e3;
+var APPROVAL_WINDOW = 20 * 6e4;
+var watchingCode = null;
+function watchForApproval(code) {
+  if (!code || watchingCode === code) return;
+  watchingCode = code;
+  const until = Date.now() + APPROVAL_WINDOW;
+  const tick = async () => {
+    if (watchingCode !== code) return;
+    if (here.roomId) {
+      watchingCode = null;
+      return;
+    }
+    if (Date.now() > until) {
+      watchingCode = null;
+      debug("gave up waiting for approval");
+      return;
+    }
+    try {
+      const { data: st } = await here.client.rpc("my_join_status", { p_token: code });
+      if (st?.status === "approved") {
+        const room = await roomFromSlugs(here.client, st.roomSlug, st.teamSlug);
+        if (room) {
+          watchingCode = null;
+          here.roomTitle = room.title;
+          await hold(room.id);
+          const url = hereUrl();
+          here.notices.push(
+            `You were let into the Floor room "${room.title}" while you were working. This terminal is now present in it, and what happens here shows up for everyone else in the room as it happens.` + (url ? ` The room is at ${url}.` : "") + ` Mention this to the person once, then carry on.`
+          );
+          debug(`walked in to ${room.id} on approval`);
+          return;
+        }
+      }
+      if (st?.status === "rejected") {
+        watchingCode = null;
+        forgetRoom();
+        here.notices.push(
+          "The request to join that Floor room was turned down. Tell the person, and do not ask again without checking with them first."
+        );
+        return;
+      }
+    } catch (e) {
+      debug(`approval poll: ${e?.message ?? e}`);
+    }
+    setTimeout(tick, APPROVAL_EVERY).unref?.();
+  };
+  setTimeout(tick, APPROVAL_EVERY).unref?.();
+}
 async function resume() {
   const saved = rememberedRoom();
   const pending = saved ? null : pendingCode();
@@ -39767,6 +39833,7 @@ async function resume() {
     }
     const { data: st } = await here.client.rpc("my_join_status", { p_token: pending });
     if (st?.status !== "approved") {
+      if (st?.status === "pending") watchForApproval(pending);
       await drain();
       return;
     }
@@ -39859,8 +39926,9 @@ This machine is not a member yet. Ask the person what display name they want eve
       return say(`Already a member. Run /floor status.`);
     }
     rememberPending(code);
+    watchForApproval(code);
     return say(
-      `Asked to join as ${nm}. The room owner has to approve it \u2014 they will see it at ${siteOrigin()}. Nothing to retype: the next time this terminal starts it will walk in by itself once approved, and /floor status will print the room's link then.`
+      `Asked to join as ${nm}. The room owner has to approve it \u2014 they will see it at ${siteOrigin()}. Nothing more to run: this terminal is watching, and walks in by itself the moment they say yes, whether that is in ten seconds or after Claude Code has been closed and reopened.`
     );
   }
   if (name === "floor_repo") {
@@ -39941,6 +40009,26 @@ This machine is not a member yet. Ask the person what display name they want eve
       if (saved) {
         here.roomTitle = saved.title ?? null;
         await hold(saved.roomId);
+      }
+    }
+    if (!here.roomId) {
+      const code = pendingCode();
+      if (code) {
+        const { data: st } = await db.rpc("my_join_status", { p_token: code });
+        if (st?.status === "approved") {
+          const room = await roomFromSlugs(db, st.roomSlug, st.teamSlug);
+          if (room) {
+            here.roomTitle = room.title;
+            await hold(room.id);
+          }
+        } else if (st?.status === "pending") {
+          watchForApproval(code);
+          return say(
+            "Still waiting on the room owner to approve this machine. Nothing to run \u2014 it walks in by itself the moment they do."
+          );
+        } else if (st?.status === "rejected") {
+          return say("That request to join was turned down.");
+        }
       }
     }
     if (!here.roomId) {
