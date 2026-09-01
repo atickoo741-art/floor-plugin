@@ -39045,6 +39045,15 @@ var here = {
   agentName: null,
   /** Whether this terminal holds one of the team's seats. Rule 4. */
   seat: false,
+  /**
+   * What the room has last been told this agent is doing.
+   *
+   * Cached here so the report is one write per transition rather than one per
+   * hook — this is consulted on every tool call, and the whole point of the
+   * RPC being idempotent is so that a mistake here costs a no-op instead of a
+   * round trip. Null means "not yet told", which is not the same as idle.
+   */
+  activity: null,
   feed: null,
   /** Items 358-360: what the room has asked of this agent, not yet acted on. */
   stopped: null,
@@ -39185,6 +39194,7 @@ async function leftRoom(reason) {
   here.pendingDirections.length = 0;
   here.awaitingApproval.clear();
   here.notices.length = 0;
+  here.activity = null;
   watchingCode = null;
   forgetRoom();
   process.stderr.write(`floor: ${reason}
@@ -39554,6 +39564,19 @@ ${FENCE}
     }
   };
 }
+function markActivity(state) {
+  if (!here.agentId || here.activity === state) return;
+  here.activity = state;
+  void here.client.rpc("set_agent_activity", { p_agent: here.agentId, p_state: state }).then(({ data, error: error2 }) => {
+    if (error2 || data?.ok === false) {
+      here.activity = null;
+      debug(`could not report ${state}: ${error2?.message ?? data?.reason}`);
+    }
+  }, (e) => {
+    here.activity = null;
+    debug(`activity: ${e?.message ?? e}`);
+  });
+}
 async function send(payload) {
   if (!here.roomId) return;
   const mapped = toEvent(payload);
@@ -39569,6 +39592,7 @@ async function send(payload) {
   if (mapped.actor === "agent") {
     const agentId = await ensureAgent();
     if (!agentId) return;
+    markActivity(payload.hook_event_name === "Stop" ? "idle" : "working");
     const { data, error: error2 } = await here.client.rpc("append_agent_event", {
       p_agent: agentId,
       p_kind: mapped.kind,
@@ -39583,6 +39607,7 @@ async function send(payload) {
   } else if (mapped.terminal) {
     const agentId = await ensureAgent();
     if (!agentId) return;
+    markActivity("working");
     const { data, error: error2 } = await here.client.rpc("append_terminal_note", {
       p_agent: agentId,
       p_text: String(mapped.body.text ?? "")
