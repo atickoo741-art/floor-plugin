@@ -1,0 +1,17 @@
+{
+  "name": "floor",
+  "version": "0.1.0",
+  "description": "Join a Floor room from your terminal. Your agents run here; everyone in the room can see them.",
+  "author": {
+    "name": "Floor"
+  },
+  "commands": [
+    "./commands/join.md",
+    "./commands/repo.md",
+    "./commands/sync.md",
+    "./commands/open.md",
+    "./commands/status.md",
+    "./commands/leave.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

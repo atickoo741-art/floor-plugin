@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "floor",
+  "description": "Join a Floor room from your terminal.",
+  "owner": {
+    "name": "Floor"
+  },
+  "plugins": [
+    {
+      "name": "floor",
+      "source": "./",
+      "description": "Claude Code plugin: join a Floor room from your terminal",
+      "version": "0.1.0",
+      "keywords": [
+        "floor",
+        "multiplayer",
+        "collaboration",
+        "rooms"
+      ]
+    }
+  ]
+}
