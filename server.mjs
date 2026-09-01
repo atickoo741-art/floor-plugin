@@ -39418,6 +39418,7 @@ async function leftRoom(reason) {
   here.announce.length = 0;
   here.activity = null;
   here.announce.push(reason);
+  releaseHolds("stopped");
   watchingCode = null;
   forgetRoom();
   process.stderr.write(`floor: ${reason}
@@ -39455,10 +39456,16 @@ function ensureAgent() {
 async function makeAgent() {
   if (here.agentId) return here.agentId;
   const db = here.client;
-  const { data: mine } = await db.from("agents").select("id, name, asleep_at").eq("room_id", here.roomId).eq("spawned_by", here.userId).is("dismissed_at", null).order("created_at", { ascending: false }).limit(1);
+  const { data: mine } = await db.from("agents").select("id, name, asleep_at, paused").eq("room_id", here.roomId).eq("spawned_by", here.userId).is("dismissed_at", null).order("created_at", { ascending: false }).limit(1);
   if (mine?.[0]) {
     here.agentId = mine[0].id;
     here.agentName = mine[0].name;
+    here.paused = mine[0].paused === true;
+    if (here.paused) {
+      here.announce.push(
+        "This agent is still paused from the room, from before this session started. Nothing here runs until it is unpaused."
+      );
+    }
     if (mine[0].asleep_at) {
       const { data: data2 } = await db.rpc("wake_agent", { p_agent: here.agentId });
       debug(`woke after ${data2?.sleptSeconds ?? "?"}s`);
@@ -39544,7 +39551,7 @@ floor: remove it, or set FLOOR_HOME to a directory you own.
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
         if (!line.trim()) continue;
-        const verdict = await ingest(line);
+        const verdict = await ingest(line, conn);
         if (verdict !== void 0) conn.write(JSON.stringify(verdict) + "\n");
       }
     });
@@ -39651,7 +39658,7 @@ async function gitCredential(op, repo) {
   debug(`git token for ${repo}, good until ${minted.expiresAt}`);
   return { ok: true, token: minted.token, expiresAt: minted.expiresAt };
 }
-async function ingest(line) {
+async function ingest(line, conn) {
   let payload;
   try {
     payload = JSON.parse(line);
@@ -39683,15 +39690,29 @@ async function ingest(line) {
     return;
   }
   if (payload.hook_event_name === "PreToolUse") {
-    const verdict = await guardWrite(payload);
     if (ready && here.roomId) void send(payload);
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
-    return verdict;
+    return await guardWrite(payload, conn);
+  }
+  if (payload.hook_event_name === "PostToolUse") {
+    if (ready && here.roomId) void send(payload);
+    else if (waiting.length < WAITING_MAX) waiting.push(payload);
+    if (here.stopped) return { systemMessage: `Floor \u2014 ${here.stopped}` };
+    if (here.paused) {
+      const why = await holdWhilePaused(conn);
+      if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
+    }
+    return {};
   }
   if (payload.hook_event_name === "UserPromptSubmit") {
     const news = here.announce.splice(0, here.announce.length);
     if (ready && here.roomId) void send(payload);
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
+    if (here.paused) {
+      news.push(
+        "This agent is paused from the room, so nothing here will run. Unpause it in the room and say that again."
+      );
+    }
     return news.length ? { systemMessage: `Floor \u2014 ${news.join(" ")}` } : {};
   }
   if (!ready || !here.roomId) {
@@ -39765,12 +39786,37 @@ function halt(reason) {
     }
   };
 }
-async function guardWrite(payload) {
+var HOLD_MAX_MS = 45e3;
+var holds = /* @__PURE__ */ new Set();
+function releaseHolds(why) {
+  for (const done of [...holds]) done(why);
+  holds.clear();
+}
+function holdWhilePaused(conn) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (why) => {
+      if (settled) return;
+      settled = true;
+      holds.delete(done);
+      clearTimeout(timer);
+      resolve(why);
+    };
+    const timer = setTimeout(() => done("expired"), HOLD_MAX_MS);
+    timer.unref?.();
+    holds.add(done);
+    try {
+      conn?.write(JSON.stringify({ floorPaused: true }) + "\n");
+    } catch {
+    }
+  });
+}
+var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
+async function guardWrite(payload, conn) {
   if (here.stopped) return halt(here.stopped);
   if (here.paused) {
-    return halt(
-      "This agent is paused from the room. Nothing here runs until somebody resumes it, and working around it is not the answer \u2014 wait."
-    );
+    const why = await holdWhilePaused(conn);
+    if (why !== "resumed") return halt(holdEnded(why));
   }
   const directions = () => {
     if (!here.pendingDirections.length) return null;
@@ -40046,6 +40092,7 @@ async function onRoomEvent(row) {
       here.seatLost = "forced";
       here.stopped = SEAT_RELEASED;
       here.announce.push(SEAT_RELEASED);
+      releaseHolds("stopped");
       here.activity = null;
       process.stderr.write(`floor: ${SEAT_RELEASED}
 `);
@@ -40069,29 +40116,33 @@ async function onRoomEvent(row) {
   if (c.kind === "stop" || c.kind === "release") {
     here.stopped = "Someone in the room stopped this agent.";
     here.announce.push(here.stopped);
+    releaseHolds("stopped");
     return;
   }
   if (c.kind === "pause") {
     here.paused = true;
-    here.announce.push(
-      "This agent was paused from the room. Nothing here runs until somebody resumes it."
-    );
+    here.announce.push("The room paused this agent, interrupting whatever it was running.");
+    const killed = await killRunningTools(process.ppid);
+    debug(`pause: interrupted ${killed.length} running process(es)`);
     return;
   }
   if (c.kind === "resume") {
     here.paused = false;
     here.stopped = null;
-    here.announce.push("The room resumed this agent. Carry on.");
+    here.announce.push("The room unpaused this agent; it carries on from where it stopped.");
+    releaseHolds("resumed");
     return;
   }
   if (c.kind === "dismissed") {
     here.stopped = c.why ? `This agent was dismissed from the room: ${c.why}` : "This agent was dismissed from the room.";
     here.announce.push(here.stopped);
+    releaseHolds("stopped");
     return;
   }
   if (c.kind === "hard_stop") {
     here.stopped = "Someone in the room hard-stopped this agent.";
     here.announce.push(here.stopped);
+    releaseHolds("stopped");
     const parent = process.ppid;
     const killed = await killRunningTools(parent);
     debug(`hard stop: interrupted ${killed.length} running process(es)`);

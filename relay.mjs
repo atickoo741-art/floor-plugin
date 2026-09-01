@@ -62,6 +62,7 @@ var OK = () => {
 };
 var FLOOR_MS = 1e3;
 var CEILING_MS = 3e4;
+var HELD_MS = 5e4;
 var asked = Number(process.env.FLOOR_HOOK_TIMEOUT_MS);
 var TIMEOUT_MS = Number.isFinite(asked) && asked > 0 ? Math.min(Math.max(asked, FLOOR_MS), CEILING_MS) : 1500;
 var recordUnchecked = (payload) => {
@@ -101,7 +102,16 @@ var isWrite = false;
 try {
   parsed = JSON.parse(raw || "{}");
   isWrite = parsed?.hook_event_name === "PreToolUse";
-  wantsReply = isWrite || parsed?.hook_event_name === "UserPromptSubmit";
+  wantsReply = isWrite || parsed?.hook_event_name === "UserPromptSubmit" || /**
+   * PostToolUse waits as well, and only for the pause.
+   *
+   * It is the moment the tool has finished and the model has not seen the
+   * result — the closest thing this process has to where escape lands — so
+   * it is where a paused agent is parked. The server answers instantly when
+   * nothing is paused, which is every ordinary tool call, so the cost is one
+   * round trip to a unix socket on the same machine.
+   */
+  parsed?.hook_event_name === "PostToolUse";
 } catch {
 }
 if (wantsReply) {
@@ -135,11 +145,28 @@ try {
     let reply = "";
     sock.on("data", (d) => {
       reply += d;
-      if (!reply.includes("\n")) return;
-      clearTimeout(bail);
-      trace(`verdict ${reply.trim().slice(0, 60)}`);
-      process.stdout.write(reply.trim());
-      process.exit(0);
+      let nl;
+      while ((nl = reply.indexOf("\n")) !== -1) {
+        const line = reply.slice(0, nl).trim();
+        reply = reply.slice(nl + 1);
+        if (!line) continue;
+        let held = false;
+        try {
+          held = JSON.parse(line)?.floorPaused === true;
+        } catch {
+        }
+        if (held) {
+          clearTimeout(bail);
+          bail = setTimeout(isWrite ? ALLOW_UNCHECKED : OK, HELD_MS);
+          bail.unref?.();
+          trace("paused: holding");
+          continue;
+        }
+        clearTimeout(bail);
+        trace(`verdict ${line.slice(0, 60)}`);
+        process.stdout.write(line);
+        process.exit(0);
+      }
     });
     sock.on("end", () => {
       clearTimeout(bail);
