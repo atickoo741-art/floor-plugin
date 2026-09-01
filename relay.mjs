@@ -97,27 +97,29 @@ try {
 trace(`fired, ${raw.length} bytes`);
 var parsed = null;
 var wantsReply = false;
+var isWrite = false;
 try {
   parsed = JSON.parse(raw || "{}");
-  wantsReply = parsed?.hook_event_name === "PreToolUse";
+  isWrite = parsed?.hook_event_name === "PreToolUse";
+  wantsReply = isWrite || parsed?.hook_event_name === "UserPromptSubmit";
 } catch {
 }
 if (wantsReply) {
   clearTimeout(bail);
-  bail = setTimeout(ALLOW_UNCHECKED, TIMEOUT_MS);
+  bail = setTimeout(isWrite ? ALLOW_UNCHECKED : OK, TIMEOUT_MS);
   bail.unref?.();
 }
 var unsafe = ensurePrivateSockDir();
 if (unsafe) {
   trace(`refusing unsafe socket dir: ${unsafe}`);
-  if (wantsReply) ALLOW_UNCHECKED();
+  if (isWrite) ALLOW_UNCHECKED();
   OK();
 }
 try {
   const sock = connect(SOCK);
   sock.on("error", (e) => {
     trace(`socket error ${e.code}`);
-    if (wantsReply) ALLOW_UNCHECKED();
+    if (isWrite) ALLOW_UNCHECKED();
     OK();
   });
   sock.on("connect", () => {
@@ -141,7 +143,8 @@ try {
     });
     sock.on("end", () => {
       clearTimeout(bail);
-      ALLOW_UNCHECKED();
+      if (isWrite) ALLOW_UNCHECKED();
+      OK();
     });
   });
 } catch {

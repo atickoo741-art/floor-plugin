@@ -39091,6 +39091,26 @@ function git2(args, cwd) {
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
   });
 }
+var HELPER_CONFIG = (helper) => ["", helper];
+async function pointAtHelper(dir, helper) {
+  let current = [];
+  try {
+    const { stdout } = await git2(["config", "--local", "--get-all", "credential.helper"], dir);
+    current = stdout.split("\n").slice(0, -1);
+  } catch {
+  }
+  const want = HELPER_CONFIG(helper);
+  if (current.length === want.length && current.every((v, i) => v === want[i])) return false;
+  await git2(["config", "--replace-all", "credential.helper", ""], dir);
+  await git2(["config", "--add", "credential.helper", helper], dir);
+  await git2(["config", "credential.useHttpPath", "true"], dir);
+  return true;
+}
+async function configureCheckout(dir) {
+  const helper = installHelper();
+  if (!helper) return false;
+  return pointAtHelper(dir, helper);
+}
 function sameRepo(remote, fullName) {
   const full = String(remote ?? "").trim().replace(/^git@[^:]+:/, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
   return full.toLowerCase() === fullName.toLowerCase();
@@ -39101,7 +39121,14 @@ async function ensureCheckout(fullName, branch) {
   const dir = join3(REPOS, owner, name);
   const helper = installHelper();
   if (!helper) throw new Error("the credential helper could not be written");
-  const cfg = ["-c", `credential.helper=${helper}`, "-c", "credential.useHttpPath=true"];
+  const cfg = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    `credential.helper=${helper}`,
+    "-c",
+    "credential.useHttpPath=true"
+  ];
   let fresh = false;
   if (!existsSync2(join3(dir, ".git"))) {
     if (existsSync2(dir)) throw new Error(`${dir} exists and is not a git repository`);
@@ -39113,8 +39140,7 @@ async function ensureCheckout(fullName, branch) {
     if (!sameRepo(stdout, fullName)) {
       throw new Error(`${dir} is a checkout of something else (${stdout.trim()})`);
     }
-    await git2(["config", "credential.helper", helper], dir);
-    await git2(["config", "credential.useHttpPath", "true"], dir);
+    await pointAtHelper(dir, helper);
   }
   let local = false;
   if (branch) {
@@ -39201,6 +39227,16 @@ var here = {
   pendingDirections: [],
   /** Written but not yet decided: seq → text. Never delivered from here. */
   awaitingApproval: /* @__PURE__ */ new Map(),
+  /**
+   * Things to tell the PERSON at the next prompt, as opposed to `notices`,
+   * which is context for the model.
+   *
+   * The two are separate because they are read by different readers and only
+   * one of them can be relied on to pass a message along: a released seat went
+   * in as model context and came out, in the model's own words, as "we're no
+   * longer in the room" — which is not what a released seat is.
+   */
+  announce: [],
   /**
    * One-off things to tell the agent at the next tool boundary.
    *
@@ -39318,7 +39354,26 @@ async function settleRepo() {
   if (!ws?.gh_full_name) return "";
   const want = ws.branch ?? ws.base_branch ?? null;
   const local = await repoState(here.cwd);
-  if (local && local.repo.toLowerCase() === ws.gh_full_name.toLowerCase()) return "";
+  if (local && local.repo.toLowerCase() === ws.gh_full_name.toLowerCase()) {
+    const notes = [];
+    try {
+      if (await configureCheckout(here.repoRoot ?? here.cwd)) {
+        notes.push(
+          `git in this checkout now authenticates through this room \u2014 being a member is what gives this machine access to ${ws.gh_full_name}, so there is nothing to set up on GitHub`
+        );
+      }
+    } catch (e) {
+      debug(`configureCheckout: ${e?.message ?? e}`);
+    }
+    if (want && local.branch !== want) {
+      notes.push(
+        `this checkout is on ${local.branch} and the room works on ${want}` + (local.dirty ? " \u2014 commit or stash first, then `git checkout " + want + "`" : " \u2014 `git checkout " + want + "`") + `. Until then what shows in the room is work on the wrong branch`
+      );
+    }
+    return notes.length ? `
+
+${notes.join(". ").replace(/^./, (c) => c.toUpperCase())}.` : "";
+  }
   try {
     const { dir, fresh, local: branchIsLocal } = await ensureCheckout(ws.gh_full_name, want);
     const cameFrom = local ? local.repo : "here";
@@ -39360,7 +39415,9 @@ async function leftRoom(reason) {
   here.pendingDirections.length = 0;
   here.awaitingApproval.clear();
   here.notices.length = 0;
+  here.announce.length = 0;
   here.activity = null;
+  here.announce.push(reason);
   watchingCode = null;
   forgetRoom();
   process.stderr.write(`floor: ${reason}
@@ -39524,7 +39581,7 @@ var boundSession = null;
 var warnedSession = false;
 var TOUCH_EVERY = 5 * 6e4;
 var touched = 0;
-var SEAT_RELEASED = "The room's owner released this terminal's seat, so it is no longer counted as in the room and its work is not being reported there. Run /floor:status to take a seat again.";
+var SEAT_RELEASED = "The room's owner released this terminal's seat. You are still a member of the room \u2014 nobody removed you \u2014 but a seat is what Floor counts as being in it, so nothing here reaches the room until you hold one again. /floor:status takes it back.";
 var retakeAsked = 0;
 var retakeRefusal = null;
 async function retakeSeat() {
@@ -39631,6 +39688,12 @@ async function ingest(line) {
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
     return verdict;
   }
+  if (payload.hook_event_name === "UserPromptSubmit") {
+    const news = here.announce.splice(0, here.announce.length);
+    if (ready && here.roomId) void send(payload);
+    else if (waiting.length < WAITING_MAX) waiting.push(payload);
+    return news.length ? { systemMessage: `Floor \u2014 ${news.join(" ")}` } : {};
+  }
   if (!ready || !here.roomId) {
     if (waiting.length < WAITING_MAX) waiting.push(payload);
     else debug("queue full, dropping");
@@ -39690,24 +39753,24 @@ async function noteUnclaimedWrite(agentId, what, why) {
   } catch {
   }
 }
+function halt(reason) {
+  return {
+    continue: false,
+    stopReason: reason,
+    systemMessage: `Floor \u2014 ${reason}`,
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: `Floor: ${reason}`
+    }
+  };
+}
 async function guardWrite(payload) {
-  if (here.stopped) {
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: `Floor: ${here.stopped} Stop what you are doing, do not run anything further, and say plainly that the room stopped you.`
-      }
-    };
-  }
+  if (here.stopped) return halt(here.stopped);
   if (here.paused) {
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: "Floor: this agent is paused from the room. Wait rather than working around it, and say that you are paused."
-      }
-    };
+    return halt(
+      "This agent is paused from the room. Nothing here runs until somebody resumes it, and working around it is not the answer \u2014 wait."
+    );
   }
   const directions = () => {
     if (!here.pendingDirections.length) return null;
@@ -39982,6 +40045,7 @@ async function onRoomEvent(row) {
     if (c.kind === "seat_lost" && c.why === "force_released") {
       here.seatLost = "forced";
       here.stopped = SEAT_RELEASED;
+      here.announce.push(SEAT_RELEASED);
       here.activity = null;
       process.stderr.write(`floor: ${SEAT_RELEASED}
 `);
@@ -40004,23 +40068,30 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "stop" || c.kind === "release") {
     here.stopped = "Someone in the room stopped this agent.";
+    here.announce.push(here.stopped);
     return;
   }
   if (c.kind === "pause") {
     here.paused = true;
+    here.announce.push(
+      "This agent was paused from the room. Nothing here runs until somebody resumes it."
+    );
     return;
   }
   if (c.kind === "resume") {
     here.paused = false;
     here.stopped = null;
+    here.announce.push("The room resumed this agent. Carry on.");
     return;
   }
   if (c.kind === "dismissed") {
     here.stopped = c.why ? `This agent was dismissed from the room: ${c.why}` : "This agent was dismissed from the room.";
+    here.announce.push(here.stopped);
     return;
   }
   if (c.kind === "hard_stop") {
     here.stopped = "Someone in the room hard-stopped this agent.";
+    here.announce.push(here.stopped);
     const parent = process.ppid;
     const killed = await killRunningTools(parent);
     debug(`hard stop: interrupted ${killed.length} running process(es)`);
@@ -40254,16 +40325,23 @@ This machine is not a member yet. Ask the person what display name they want eve
         `The room has no repo linked yet, so anything worked on here will be mirrored without one. This directory is ${local.repo} on ${local.branch}.`
       );
     }
+    let wired = false;
+    try {
+      wired = await configureCheckout(here.repoRoot ?? here.cwd);
+    } catch (e) {
+      debug(`configureCheckout: ${e?.message ?? e}`);
+    }
+    const access = wired ? ` git here now authenticates through your membership of this room, so fetching and pushing ${ws.gh_full_name} needs nothing set up on GitHub.` : "";
     const want = ws.branch ?? ws.base_branch;
     if (want && local.branch !== want) {
       return say(
-        `Right repo, wrong branch. The room is on ${want} and this checkout is on ${local.branch}. Switch with: git checkout ${want}` + (local.dirty ? " \u2014 commit or stash first, this tree has changes." : "")
+        `Right repo, wrong branch. The room is on ${want} and this checkout is on ${local.branch}. Switch with: git checkout ${want}` + (local.dirty ? " \u2014 commit or stash first, this tree has changes." : "") + access
       );
     }
     const d = await branchDistance(here.cwd, want ?? local.branch);
     const drift = !d.reachable ? "" : d.behind ? ` ${d.behind} commit${d.behind > 1 ? "s" : ""} behind \u2014 /floor:sync to catch up.` : d.ahead ? ` ${d.ahead} of yours not pushed yet.` : "";
     return say(
-      `In the right place: ${local.repo} on ${local.branch}` + (local.dirty ? ", with uncommitted changes." : ", clean.") + ` Work here shows in the room as it happens; others get it when you commit and they pull.${drift}`
+      `In the right place: ${local.repo} on ${local.branch}` + (local.dirty ? ", with uncommitted changes." : ", clean.") + ` Work here shows in the room as it happens; others get it when you commit and they pull.${drift}` + access
     );
   }
   if (name === "floor_sync") {
