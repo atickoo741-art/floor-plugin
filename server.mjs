@@ -39116,6 +39116,7 @@ async function ensureCheckout(fullName, branch) {
     await git2(["config", "credential.helper", helper], dir);
     await git2(["config", "credential.useHttpPath", "true"], dir);
   }
+  let local = false;
   if (branch) {
     const { stdout: status } = await git2(["status", "--porcelain"], dir);
     const { stdout: onRaw } = await git2(["rev-parse", "--abbrev-ref", "HEAD"], dir);
@@ -39126,12 +39127,18 @@ async function ensureCheckout(fullName, branch) {
           `${dir} is on ${on} with uncommitted changes, so it was not switched to ${branch}`
         );
       }
-      await git2(["fetch", "origin", branch], dir);
+      let onRemote = true;
+      try {
+        await git2(["fetch", "origin", branch], dir);
+      } catch {
+        onRemote = false;
+      }
       try {
         await git2(["checkout", branch], dir);
       } catch {
-        await git2(["checkout", "-b", branch, `origin/${branch}`], dir);
+        await git2(onRemote ? ["checkout", "-b", branch, `origin/${branch}`] : ["checkout", "-b", branch], dir);
       }
+      local = !onRemote;
     } else if (!fresh) {
       try {
         await git2(["pull", "--ff-only", "origin", branch], dir);
@@ -39139,7 +39146,7 @@ async function ensureCheckout(fullName, branch) {
       }
     }
   }
-  return { dir, fresh, branch: branch ?? null };
+  return { dir, fresh, branch: branch ?? null, local };
 }
 
 // packages/plugin/src/server.mjs
@@ -39313,13 +39320,14 @@ async function settleRepo() {
   const local = await repoState(here.cwd);
   if (local && local.repo.toLowerCase() === ws.gh_full_name.toLowerCase()) return "";
   try {
-    const { dir, fresh } = await ensureCheckout(ws.gh_full_name, want);
+    const { dir, fresh, local: branchIsLocal } = await ensureCheckout(ws.gh_full_name, want);
+    const cameFrom = local ? local.repo : "here";
     here.cwd = dir;
     here.repoRoot = await repoRoot(dir) ?? dir;
     debug(`checkout ${fresh ? "cloned" : "found"} at ${dir}`);
     return `
 
-${fresh ? "Cloned" : "Found"} ${ws.gh_full_name}${want ? ` on ${want}` : ""} at ${dir}. Joining the room is what gave this machine access to it \u2014 nothing to set up on GitHub, and git push works from there while you are a member. Work from that directory: run \`cd ${dir}\` before anything else. This terminal now reports work from there, not from ${local ? local.repo : "here"}.`;
+${fresh ? "Cloned" : "Found"} ${ws.gh_full_name}${want ? ` on ${want}` : ""} at ${dir}. Joining the room is what gave this machine access to it \u2014 nothing to set up on GitHub, and git push works from there while you are a member. Work from that directory: run \`cd ${dir}\` before anything else. This terminal now reports work from there, not from ${cameFrom}.` + (branchIsLocal ? ` The branch ${want} is not on the remote yet \u2014 it starts here and your first push publishes it.` : "");
   } catch (e) {
     const why = String(e?.stderr ?? e?.message ?? e).trim().split("\n").slice(-1)[0];
     return `
