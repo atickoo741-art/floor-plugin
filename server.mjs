@@ -39460,16 +39460,19 @@ async function makeAgent() {
   if (mine?.[0]) {
     here.agentId = mine[0].id;
     here.agentName = mine[0].name;
-    here.paused = mine[0].paused === true;
-    if (here.paused) {
+    if (mine[0].paused === true) {
+      const { error: error3 } = await db.rpc("control_agent", {
+        p_agent: here.agentId,
+        p_control: "resume"
+      });
+      here.paused = false;
       here.announce.push(
-        "This agent is still paused from the room, from before this session started. Nothing here runs until it is unpaused."
+        error3 ? `This agent was paused from the room before this session started, and Floor could not lift it: ${error3.message}. Unpause it in the room.` : "This agent was paused from the room before this session started. A new session starts unpaused, so that has been lifted and the room has been told."
       );
+      debug(error3 ? `could not clear stale pause: ${error3.message}` : "stale pause cleared");
     }
-    if (mine[0].asleep_at) {
-      const { data: data2 } = await db.rpc("wake_agent", { p_agent: here.agentId });
-      debug(`woke after ${data2?.sleptSeconds ?? "?"}s`);
-    }
+    const { data: woke } = await db.rpc("wake_agent", { p_agent: here.agentId });
+    if (mine[0].asleep_at) debug(`woke after ${woke?.sleptSeconds ?? "?"}s`);
     return here.agentId;
   }
   const { data: taken } = await db.from("agents").select("name").eq("room_id", here.roomId);
