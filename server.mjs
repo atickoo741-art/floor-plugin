@@ -11554,8 +11554,8 @@ var require_RealtimeChannel = __commonJS({
       }
       /** @internal */
       _notThisChannelEvent(event, ref) {
-        const { close, error: error2, leave, join: join3 } = constants_1.CHANNEL_EVENTS;
-        const events = [close, error2, leave, join3];
+        const { close, error: error2, leave, join: join4 } = constants_1.CHANNEL_EVENTS;
+        const events = [close, error2, leave, join4];
         return ref && events.includes(event) && ref !== this.joinPush.ref;
       }
       /** @internal */
@@ -20024,7 +20024,7 @@ var require_GoTrueClient = __commonJS({
         }
       }
       async _verify(params) {
-        const run3 = async () => {
+        const run4 = async () => {
           try {
             return await this._useSession(async (result) => {
               var _a3;
@@ -20055,12 +20055,12 @@ var require_GoTrueClient = __commonJS({
           }
         };
         if (this.lock != null) {
-          return this._acquireLock(this.lockAcquireTimeout, run3);
+          return this._acquireLock(this.lockAcquireTimeout, run4);
         }
-        return run3();
+        return run4();
       }
       async _challenge(params) {
-        const run3 = async () => {
+        const run4 = async () => {
           try {
             return await this._useSession(async (result) => {
               var _a3;
@@ -20101,9 +20101,9 @@ var require_GoTrueClient = __commonJS({
           }
         };
         if (this.lock != null) {
-          return this._acquireLock(this.lockAcquireTimeout, run3);
+          return this._acquireLock(this.lockAcquireTimeout, run4);
         }
-        return run3();
+        return run4();
       }
       /**
        * {@link GoTrueMFAApi#challengeAndVerify}
@@ -38919,6 +38919,14 @@ function toControl(row, agentId, userId) {
       return { kind: "left" };
     }
   }
+  if (kind === "participant" && userId && body.what === "seat.released") {
+    if (body.subject === userId) {
+      return { kind: "seat_lost", why: body.why ?? null };
+    }
+    if (!body.subject && row?.actor_id === userId && body.why === "left") {
+      return { kind: "seat_dropped" };
+    }
+  }
   if (!agentId) return null;
   if (kind === "status" && body.what === "control" && forMe) {
     if (["stop", "pause", "resume", "release"].includes(body.control)) {
@@ -39020,8 +39028,122 @@ function linkReturnUrl(next) {
   return u.toString();
 }
 
+// packages/plugin/src/git.mjs
+import { execFile as execFile3 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname2, join as join3 } from "node:path";
+import { fileURLToPath } from "node:url";
+var run3 = promisify3(execFile3);
+var HERE = dirname2(fileURLToPath(import.meta.url));
+var HELPER = join3(paths.DIR, "git-credential");
+var REPOS = process.env.FLOOR_REPOS ?? join3(homedir3(), "Floor");
+function installHelper() {
+  const credential = join3(HERE, "credential.mjs");
+  const runsh = [join3(HERE, "bin", "run.sh"), join3(HERE, "..", "bin", "run.sh")].find((p) => existsSync2(p));
+  if (!runsh || !existsSync2(credential)) return null;
+  mkdirSync3(paths.DIR, { recursive: true, mode: 448 });
+  writeFileSync2(
+    HELPER,
+    `#!/bin/sh
+# Written by the Floor plugin each time it starts. Gives git a token for a
+# repository the rooms you are in work on. Nothing to edit here.
+exec sh "${runsh}" "${credential}" "$@"
+`,
+    { mode: 448 }
+  );
+  try {
+    chmodSync2(HELPER, 448);
+  } catch {
+  }
+  return HELPER;
+}
+async function requestToken(accessToken, repo) {
+  const res = await fetch(`${siteOrigin()}/api/git/credential`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ repo })
+  });
+  let body = {};
+  try {
+    body = await res.json();
+  } catch {
+  }
+  if (!res.ok || body?.ok !== true) {
+    return {
+      ok: false,
+      reason: body?.reason ?? `HTTP_${res.status}`,
+      message: body?.message ?? null
+    };
+  }
+  return { ok: true, token: body.token, expiresAt: body.expiresAt, branch: body.branch ?? null };
+}
+function git2(args, cwd) {
+  return run3("git", args, {
+    cwd,
+    maxBuffer: 16 * 1024 * 1024,
+    // Never a password prompt from inside an MCP server: no terminal to answer
+    // it on, and the helper is the answer anyway.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+  });
+}
+function sameRepo(remote, fullName) {
+  const full = String(remote ?? "").trim().replace(/^git@[^:]+:/, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
+  return full.toLowerCase() === fullName.toLowerCase();
+}
+async function ensureCheckout(fullName, branch) {
+  const [owner, name] = fullName.split("/");
+  if (!owner || !name) throw new Error(`not a repository name: ${fullName}`);
+  const dir = join3(REPOS, owner, name);
+  const helper = installHelper();
+  if (!helper) throw new Error("the credential helper could not be written");
+  const cfg = ["-c", `credential.helper=${helper}`, "-c", "credential.useHttpPath=true"];
+  let fresh = false;
+  if (!existsSync2(join3(dir, ".git"))) {
+    if (existsSync2(dir)) throw new Error(`${dir} exists and is not a git repository`);
+    mkdirSync3(dirname2(dir), { recursive: true });
+    await git2(["clone", ...cfg, "--no-tags", `https://github.com/${fullName}.git`, dir]);
+    fresh = true;
+  } else {
+    const { stdout } = await git2(["remote", "get-url", "origin"], dir);
+    if (!sameRepo(stdout, fullName)) {
+      throw new Error(`${dir} is a checkout of something else (${stdout.trim()})`);
+    }
+    await git2(["config", "credential.helper", helper], dir);
+    await git2(["config", "credential.useHttpPath", "true"], dir);
+  }
+  if (branch) {
+    const { stdout: status } = await git2(["status", "--porcelain"], dir);
+    const { stdout: onRaw } = await git2(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+    const on = onRaw.trim();
+    if (on !== branch) {
+      if (status.trim()) {
+        throw new Error(
+          `${dir} is on ${on} with uncommitted changes, so it was not switched to ${branch}`
+        );
+      }
+      await git2(["fetch", "origin", branch], dir);
+      try {
+        await git2(["checkout", branch], dir);
+      } catch {
+        await git2(["checkout", "-b", branch, `origin/${branch}`], dir);
+      }
+    } else if (!fresh) {
+      try {
+        await git2(["pull", "--ff-only", "origin", branch], dir);
+      } catch {
+      }
+    }
+  }
+  return { dir, fresh, branch: branch ?? null };
+}
+
 // packages/plugin/src/server.mjs
-import { unlinkSync, existsSync as existsSync2, mkdirSync as mkdirSync3, chmodSync as chmodSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { unlinkSync, existsSync as existsSync3, mkdirSync as mkdirSync4, chmodSync as chmodSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "node:fs";
 var here = {
   client: null,
   userId: null,
@@ -39045,6 +39167,13 @@ var here = {
   agentName: null,
   /** Whether this terminal holds one of the team's seats. Rule 4. */
   seat: false,
+  /**
+   * Why the seat is gone, when it is. `forced` is the room's owner deciding
+   * this person is not here, and the next hook must not quietly take the seat
+   * back; `idle` is the reaper or a closing tab on the same identity, and the
+   * next hook — which is activity — should. Null while the seat is held.
+   */
+  seatLost: null,
   /**
    * What the room has last been told this agent is doing.
    *
@@ -39102,6 +39231,11 @@ async function connect() {
   here.returning = returning;
   here.anonymous = anonymous;
   here.repoRoot = await repoRoot(here.cwd);
+  try {
+    installHelper();
+  } catch (e) {
+    debug(`credential helper: ${e?.message ?? e}`);
+  }
   const { data: profile } = await client.from("profiles").select("full_name, colour").eq("id", userId).maybeSingle();
   here.name = profile?.full_name ?? null;
   here.colour = profile?.colour ?? 1;
@@ -39165,10 +39299,33 @@ async function hold(roomId) {
     );
   } else {
     here.seat = true;
+    here.seatLost = null;
     debug(seat?.fresh ? "seat taken" : "seat already held");
   }
   await watchFeed(roomId);
   if (!ready) await drain();
+}
+async function settleRepo() {
+  if (!here.roomId || !here.client) return "";
+  const { data: ws } = await here.client.from("workspaces").select("gh_full_name, branch, base_branch").eq("room_id", here.roomId).maybeSingle();
+  if (!ws?.gh_full_name) return "";
+  const want = ws.branch ?? ws.base_branch ?? null;
+  const local = await repoState(here.cwd);
+  if (local && local.repo.toLowerCase() === ws.gh_full_name.toLowerCase()) return "";
+  try {
+    const { dir, fresh } = await ensureCheckout(ws.gh_full_name, want);
+    here.cwd = dir;
+    here.repoRoot = await repoRoot(dir) ?? dir;
+    debug(`checkout ${fresh ? "cloned" : "found"} at ${dir}`);
+    return `
+
+${fresh ? "Cloned" : "Found"} ${ws.gh_full_name}${want ? ` on ${want}` : ""} at ${dir}. Joining the room is what gave this machine access to it \u2014 nothing to set up on GitHub, and git push works from there while you are a member. Work from that directory: run \`cd ${dir}\` before anything else. This terminal now reports work from there, not from ${local ? local.repo : "here"}.`;
+  } catch (e) {
+    const why = String(e?.stderr ?? e?.message ?? e).trim().split("\n").slice(-1)[0];
+    return `
+
+The room works on ${ws.gh_full_name}, and this directory is ${local ? `${local.repo}` : "not a git repository"}. Floor tried to clone it for you and could not: ${why}. /floor:repo tries again.`;
+  }
 }
 async function roomFromSlugs(db, roomSlug, teamSlug) {
   const { data } = await db.from("rooms").select("id, title, teams!inner(slug)").eq("slug", roomSlug);
@@ -39190,6 +39347,7 @@ async function leftRoom(reason) {
   here.agentId = null;
   here.agentName = null;
   here.seat = false;
+  here.seatLost = null;
   here.paused = false;
   here.pendingDirections.length = 0;
   here.awaitingApproval.clear();
@@ -39296,7 +39454,7 @@ async function pushWorkspace() {
   } else debug(`workspace: ${snap.paths.length} files, ${snap.diff.length} bytes`);
 }
 async function listen() {
-  mkdirSync3(paths.DIR, { recursive: true });
+  mkdirSync4(paths.DIR, { recursive: true });
   const unsafe = ensurePrivateSockDir();
   if (unsafe) {
     process.stderr.write(
@@ -39306,7 +39464,7 @@ floor: remove it, or set FLOOR_HOME to a directory you own.
     );
     return;
   }
-  if (existsSync2(paths.SOCK)) {
+  if (existsSync3(paths.SOCK)) {
     try {
       unlinkSync(paths.SOCK);
     } catch {
@@ -39335,7 +39493,7 @@ floor: remove it, or set FLOOR_HOME to a directory you own.
 `));
   srv.listen(paths.SOCK, () => {
     try {
-      chmodSync2(paths.SOCK, 384);
+      chmodSync3(paths.SOCK, 384);
     } catch {
     }
   });
@@ -39358,14 +39516,75 @@ var boundSession = null;
 var warnedSession = false;
 var TOUCH_EVERY = 5 * 6e4;
 var touched = 0;
+var SEAT_RELEASED = "The room's owner released this terminal's seat, so it is no longer counted as in the room and its work is not being reported there. Run /floor:status to take a seat again.";
+var retakeAsked = 0;
+var retakeRefusal = null;
+async function retakeSeat() {
+  if (!here.roomId || here.seat) return here.seat;
+  const now = Date.now();
+  if (now - retakeAsked < 3e4) return false;
+  retakeAsked = now;
+  const { data: seat, error: error2 } = await here.client.rpc("take_seat", { p_room: here.roomId });
+  if (error2 || seat?.ok === false) {
+    const why = seat?.reason === "ROOM_FULL" ? `floor: this terminal lost its seat and every seat on the plan is now taken (${seat.seats ?? "?"}). It tries again as you work.
+` : `floor: could not take the seat back: ${error2?.message ?? seat?.message ?? seat?.reason}
+`;
+    if (why !== retakeRefusal) {
+      retakeRefusal = why;
+      process.stderr.write(why);
+    }
+    return false;
+  }
+  retakeRefusal = null;
+  here.seat = true;
+  here.seatLost = null;
+  if (here.stopped === SEAT_RELEASED) here.stopped = null;
+  debug("seat taken back");
+  return true;
+}
 function keepSeat() {
-  if (!here.seat || !here.roomId) return;
+  if (!here.roomId) return;
+  if (!here.seat) {
+    if (here.seatLost !== "forced") void retakeSeat();
+    return;
+  }
   const now = Date.now();
   if (now - touched < TOUCH_EVERY) return;
   touched = now;
   void here.client.rpc("touch_seat", { p_room: here.roomId }).then(({ error: error2 }) => {
     if (error2) debug(`touch_seat: ${error2.message}`);
   });
+}
+var gitTokens = /* @__PURE__ */ new Map();
+async function gitCredential(op, repo) {
+  const key = String(repo ?? "").toLowerCase();
+  if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(key)) return { ok: false, reason: "BAD_REPO" };
+  if (op === "erase") {
+    gitTokens.delete(key);
+    return { ok: true };
+  }
+  const have = gitTokens.get(key);
+  if (have && Date.parse(have.expiresAt) - Date.now() > 5 * 6e4) return { ok: true, ...have };
+  if (!here.client) {
+    try {
+      await connect();
+    } catch (e) {
+      return { ok: false, reason: "NOT_SIGNED_IN", message: e?.message };
+    }
+  }
+  const { data } = await here.client.auth.getSession();
+  const accessToken = data?.session?.access_token;
+  if (!accessToken) return { ok: false, reason: "NOT_SIGNED_IN" };
+  let minted;
+  try {
+    minted = await requestToken(accessToken, repo);
+  } catch (e) {
+    return { ok: false, reason: "UNREACHABLE", message: `could not reach Floor: ${e?.message ?? e}` };
+  }
+  if (minted.ok !== true) return minted;
+  gitTokens.set(key, { token: minted.token, expiresAt: minted.expiresAt });
+  debug(`git token for ${repo}, good until ${minted.expiresAt}`);
+  return { ok: true, token: minted.token, expiresAt: minted.expiresAt };
 }
 async function ingest(line) {
   let payload;
@@ -39374,6 +39593,9 @@ async function ingest(line) {
   } catch {
     debug("unparseable line");
     return;
+  }
+  if (payload?.floor === "git-credential") {
+    return gitCredential(payload.op, payload.repo);
   }
   const sid = payload?.session_id;
   if (sid) {
@@ -39416,7 +39638,7 @@ async function drainUnchecked() {
   try {
     lines = readFileSync2(unclaimedPath(), "utf8").split("\n").filter(Boolean);
     if (!lines.length) return;
-    writeFileSync2(unclaimedPath(), "", { mode: 384 });
+    writeFileSync3(unclaimedPath(), "", { mode: 384 });
   } catch {
     return;
   }
@@ -39656,7 +39878,7 @@ var TOOLS = [
   },
   {
     name: "floor_repo",
-    description: "Check that this working directory is the repo and branch the room is working on. Call it after joining, before doing any work.",
+    description: "Check that this working directory is the repo and branch the room is working on, and if it is not, get a checkout of it: joining the room is what gives this machine access, and Floor clones it to ~/Floor. Call it after joining, before doing any work.",
     inputSchema: { type: "object", properties: {} }
   },
   {
@@ -39738,9 +39960,29 @@ async function controlIsReal(kind) {
 }
 var VERIFIED = /* @__PURE__ */ new Set(["stop", "release", "pause", "resume", "dismissed", "hard_stop"]);
 async function onRoomEvent(row) {
+  if (here.roomId && row?.room_id && row.room_id !== here.roomId) return;
   const c = toControl(row, here.agentId, here.userId);
   if (!c) return;
   debug(`control: ${c.kind}`);
+  if (c.kind === "seat_lost" || c.kind === "seat_dropped") {
+    const { data: still } = await here.client.from("room_seats").select("user_id").eq("room_id", here.roomId).eq("user_id", here.userId).maybeSingle();
+    if (still) {
+      debug(`${c.kind}: the seat is still held, ignoring`);
+      return;
+    }
+    here.seat = false;
+    if (c.kind === "seat_lost" && c.why === "force_released") {
+      here.seatLost = "forced";
+      here.stopped = SEAT_RELEASED;
+      here.activity = null;
+      process.stderr.write(`floor: ${SEAT_RELEASED}
+`);
+    } else {
+      here.seatLost = "idle";
+      debug(`${c.kind}: seat lapsed, taking it back on the next hook`);
+    }
+    return;
+  }
   if (c.kind === "removed" || c.kind === "left") {
     await leftRoom(
       c.kind === "left" ? "You left this room from the website, so this terminal has left it too." : c.why ? `You were removed from this room: ${c.why}` : "You were removed from this room."
@@ -39839,8 +40081,9 @@ function watchForApproval(code) {
           here.roomTitle = room.title;
           await hold(room.id);
           const url = hereUrl();
+          const repoLine = await settleRepo();
           here.notices.push(
-            `You were let into the Floor room "${room.title}" while you were working. This terminal is now present in it, and what happens here shows up for everyone else in the room as it happens.` + (url ? ` The room is at ${url}.` : "") + ` Mention this to the person once, then carry on.`
+            `You were let into the Floor room "${room.title}" while you were working. This terminal is now present in it, and what happens here shows up for everyone else in the room as it happens.` + (url ? ` The room is at ${url}.` : "") + repoLine + ` Mention this to the person once, then carry on.`
           );
           debug(`walked in to ${room.id} on approval`);
           return;
@@ -39925,7 +40168,7 @@ async function call(name, args) {
       here.roomTitle = room.title;
       await hold(room.id);
       return say(
-        `Already in "${room.title}". This terminal is connected and now shows as present in the room.` + webLine()
+        `Already in "${room.title}". This terminal is connected and now shows as present in the room.` + webLine() + await settleRepo()
       );
     }
     if (status === "pending") {
@@ -39967,7 +40210,7 @@ This machine is not a member yet. Ask the person what display name they want eve
         here.roomTitle = room.title;
         await hold(room.id);
         return say(
-          `In "${room.title}" as ${nm}. This terminal shows as present.` + webLine()
+          `In "${room.title}" as ${nm}. This terminal shows as present.` + webLine() + await settleRepo()
         );
       }
       return say(`Already a member. Run /floor status.`);
@@ -39989,6 +40232,10 @@ This machine is not a member yet. Ask the person what display name they want eve
     if (!here.roomId) return say("This terminal is not in a room. /floor:join <code>");
     const { data: ws } = await db.from("workspaces").select("gh_full_name, branch, base_branch").eq("room_id", here.roomId).maybeSingle();
     const local = await repoState(here.cwd);
+    if (ws?.gh_full_name && (!local || local.repo.toLowerCase() !== ws.gh_full_name.toLowerCase())) {
+      const line = await settleRepo();
+      return say(line.trim() || `Could not settle on a checkout of ${ws.gh_full_name}.`);
+    }
     if (!local) {
       return say(
         `This directory is not a git repository, so nothing here can be mirrored to the room. Change to the checkout of ${ws?.gh_full_name ?? "the room's repo"} and run /floor:repo again.`
@@ -39997,11 +40244,6 @@ This machine is not a member yet. Ask the person what display name they want eve
     if (!ws?.gh_full_name) {
       return say(
         `The room has no repo linked yet, so anything worked on here will be mirrored without one. This directory is ${local.repo} on ${local.branch}.`
-      );
-    }
-    if (local.repo.toLowerCase() !== ws.gh_full_name.toLowerCase()) {
-      return say(
-        `Wrong repo. The room is working on ${ws.gh_full_name}; this directory is ${local.repo}. Floor cannot clone it for you \u2014 access to that repo comes from GitHub, not from Floor. Change to a checkout of it and run /floor:repo again.`
       );
     }
     const want = ws.branch ?? ws.base_branch;
@@ -40083,11 +40325,17 @@ This machine is not a member yet. Ask the person what display name they want eve
         here.returning ? "This terminal is registered with Floor but not in a room. /floor join <code>" : "This machine has just registered with Floor. /floor join <code> to enter a room."
       );
     }
+    let seatLine = "";
+    if (!here.seat) {
+      retakeAsked = 0;
+      const back = await retakeSeat();
+      seatLine = back ? "\nSeat taken again \u2014 this terminal counts as in the room and its work is reported." : "\nThis terminal holds no seat, so its work is not reported to the room.";
+    }
     const state = here.channel?.presenceState() ?? {};
     const people = Object.values(state).flat().map((p) => p?.name).filter(Boolean);
     return say(
       `In "${here.roomTitle ?? here.roomId}" as ${here.name ?? "someone"}.
-Present: ${people.length ? people.join(", ") : "just this terminal"}` + webLine()
+Present: ${people.length ? people.join(", ") : "just this terminal"}` + seatLine + webLine()
     );
   }
   if (name === "floor_link") {

@@ -13,5 +13,8 @@ Join the Floor room whose invite code is `$ARGUMENTS`.
 3. Call `floor_request_join` with the code and that name.
 4. Report back what it says. If it is pending, say plainly that the room owner
    has to approve them and that they can keep working meanwhile.
+5. If the reply says the room's repository was cloned or found somewhere, tell
+   the person where, and `cd` there before doing any work. Joining the room is
+   what gave this machine access to it — there is nothing to set up on GitHub.
 
 Do not run any other tools while doing this.

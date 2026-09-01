@@ -43,9 +43,13 @@ everyone else as it happens.
   asks the room whether anyone else has claimed the file you are about to
   write. That check **fails open** — Floor will never wedge the terminal it
   lives in — and when it does, it says so rather than pretending it passed.
-- Reads your git checkout to mirror what changes. It never pushes anything, and
-  never has repository access of its own: that comes from GitHub, not from
-  Floor.
+- Reads your git checkout to mirror what changes. It never pushes anything
+  itself.
+- Gets you the room's repository. If you are not already in a checkout of it,
+  `/floor:join` clones it to `~/Floor/<owner>/<repo>` on the room's branch.
+  Being a member of the room is what gives your git access: a credential
+  helper in `~/.floor` asks Floor for a token scoped to that one repository,
+  good for an hour, whenever git needs one. Leave the room and it stops.
 
 ## Privacy
 
