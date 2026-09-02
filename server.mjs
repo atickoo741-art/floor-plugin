@@ -39233,13 +39233,6 @@ var here = {
   stopped: null,
   paused: false,
   /**
-   * Whether the person at this terminal has been told about the current
-   * pause. Parking a hook stops the agent dead but says nothing while it
-   * does — "when it actually pauses it doesn't tell at all" — so the first
-   * hook after a pause carries the notice and the ones after it park.
-   */
-  pauseSaid: false,
-  /**
    * Directions the owner has cleared, waiting for the next tool boundary.
    * Nothing reaches this list that the database did not say could.
    */
@@ -39721,10 +39714,6 @@ async function ingest(line, conn) {
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
     if (here.stopped) return { systemMessage: `Floor \u2014 ${here.stopped}` };
     if (here.paused) {
-      if (!here.pauseSaid) {
-        here.pauseSaid = true;
-        return { systemMessage: `Floor \u2014 ${PAUSED_NOTICE}` };
-      }
       const why = await holdWhilePaused(conn);
       if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
       return { systemMessage: `Floor \u2014 ${RESUMED_NOTICE}` };
@@ -39814,7 +39803,7 @@ function halt(reason) {
     }
   };
 }
-var HOLD_MAX_MS = 45e3;
+var HOLD_MAX_MS = 6e5;
 var holds = /* @__PURE__ */ new Set();
 function releaseHolds(why) {
   for (const done of [...holds]) done(why);
@@ -39839,24 +39828,12 @@ function holdWhilePaused(conn) {
     }
   });
 }
-var PAUSED_NOTICE = "The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else.";
 var RESUMED_NOTICE = "The room unpaused this agent. Carrying on from exactly where it stopped.";
 var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
 async function guardWrite(payload, conn) {
   let unpaused = null;
   if (here.stopped) return halt(here.stopped);
   if (here.paused) {
-    if (!here.pauseSaid) {
-      here.pauseSaid = true;
-      return {
-        systemMessage: `Floor \u2014 ${PAUSED_NOTICE}`,
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: `Floor: ${PAUSED_NOTICE}`
-        }
-      };
-    }
     const why = await holdWhilePaused(conn);
     if (why !== "resumed") return halt(holdEnded(why));
     unpaused = RESUMED_NOTICE;
@@ -40169,17 +40146,13 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "pause") {
     here.paused = true;
-    here.pauseSaid = false;
-    here.announce.push("The room paused this agent, interrupting whatever it was running.");
     const killed = await killRunningTools(process.ppid);
     debug(`pause: interrupted ${killed.length} running process(es)`);
     return;
   }
   if (c.kind === "resume") {
     here.paused = false;
-    here.pauseSaid = false;
     here.stopped = null;
-    here.announce.push("The room unpaused this agent; it carries on from where it stopped.");
     releaseHolds("resumed");
     return;
   }

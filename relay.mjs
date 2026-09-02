@@ -62,7 +62,7 @@ var OK = () => {
 };
 var FLOOR_MS = 1e3;
 var CEILING_MS = 3e4;
-var HELD_MS = 5e4;
+var HELD_MS = 66e4;
 var asked = Number(process.env.FLOOR_HOOK_TIMEOUT_MS);
 var TIMEOUT_MS = Number.isFinite(asked) && asked > 0 ? Math.min(Math.max(asked, FLOOR_MS), CEILING_MS) : 1500;
 var recordUnchecked = (payload) => {
