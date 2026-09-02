@@ -39233,6 +39233,17 @@ var here = {
   stopped: null,
   paused: false,
   /**
+   * Whether this pause has been said out loud yet.
+   *
+   * A held hook cannot speak — the reply is the only channel and holding means
+   * not replying — so the first hook after a pause is spent on the notice and
+   * the ones after it freeze. That trade was not affordable until the `Stop`
+   * hook started holding the turn open: before it, the model could read the
+   * notice, wrap up and end its turn, and an ended turn cannot be resumed.
+   * Now nothing can end the turn while paused, so the sentence costs nothing.
+   */
+  pauseSaid: false,
+  /**
    * Directions the owner has cleared, waiting for the next tool boundary.
    * Nothing reaches this list that the database did not say could.
    */
@@ -39714,9 +39725,46 @@ async function ingest(line, conn) {
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
     if (here.stopped) return { systemMessage: `Floor \u2014 ${here.stopped}` };
     if (here.paused) {
+      if (!here.pauseSaid) {
+        here.pauseSaid = true;
+        return { systemMessage: `Floor \u2014 ${PAUSED_NOTICE}` };
+      }
       const why = await holdWhilePaused(conn);
       if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
       return { systemMessage: `Floor \u2014 ${RESUMED_NOTICE}` };
+    }
+    return {};
+  }
+  if (payload.hook_event_name === "Stop") {
+    if (ready && here.roomId) void send(payload);
+    else if (waiting.length < WAITING_MAX) waiting.push(payload);
+    if (here.paused && !here.stopped && payload.stop_hook_active !== true) {
+      const why = await holdWhilePaused(conn);
+      if (why === "resumed") {
+        return {
+          /**
+           * Both fields, because they reach different people. `reason` is
+           * read by the model and is what actually restarts the work;
+           * `systemMessage` is the only one the person sees, and measured on
+           * 2.1.258 a Stop reply carrying both surfaces it as `Stop says: …`
+           * and still carries the turn on. Without it the terminal would
+           * silently spring back to life, which is the same complaint as a
+           * pause that says nothing, in the other direction.
+           */
+          systemMessage: `Floor \u2014 ${RESUMED_NOTICE}`,
+          decision: "block",
+          /**
+           * Instruction only, and deliberately not a repeat of the sentence
+           * above it. Claude Code renders a blocked stop as `Stop hook
+           * error: <reason>`, which it is not — it is the mechanism working —
+           * and printing the friendly notice a second time under the word
+           * "error" made a successful unpause look like a failure. The person
+           * has already been told by `systemMessage`; this is for the model.
+           */
+          reason: `Pick up exactly where you stopped and finish what you were doing. Do not start over and do not summarise.`
+        };
+      }
+      return {};
     }
     return {};
   }
@@ -39828,12 +39876,24 @@ function holdWhilePaused(conn) {
     }
   });
 }
+var PAUSED_NOTICE = "The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else.";
 var RESUMED_NOTICE = "The room unpaused this agent. Carrying on from exactly where it stopped.";
 var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
 async function guardWrite(payload, conn) {
   let unpaused = null;
   if (here.stopped) return halt(here.stopped);
   if (here.paused) {
+    if (!here.pauseSaid) {
+      here.pauseSaid = true;
+      return {
+        systemMessage: `Floor \u2014 ${PAUSED_NOTICE}`,
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `Floor: ${PAUSED_NOTICE}`
+        }
+      };
+    }
     const why = await holdWhilePaused(conn);
     if (why !== "resumed") return halt(holdEnded(why));
     unpaused = RESUMED_NOTICE;
@@ -40146,12 +40206,14 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "pause") {
     here.paused = true;
+    here.pauseSaid = false;
     const killed = await killRunningTools(process.ppid);
     debug(`pause: interrupted ${killed.length} running process(es)`);
     return;
   }
   if (c.kind === "resume") {
     here.paused = false;
+    here.pauseSaid = false;
     here.stopped = null;
     releaseHolds("resumed");
     return;

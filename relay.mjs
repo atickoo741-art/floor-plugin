@@ -111,7 +111,23 @@ try {
    * nothing is paused, which is every ordinary tool call, so the cost is one
    * round trip to a unix socket on the same machine.
    */
-  parsed?.hook_event_name === "PostToolUse";
+  parsed?.hook_event_name === "PostToolUse" || /**
+   * And Stop, which is what makes unpause work without anybody typing.
+   *
+   * Stop fires when the model is about to finish, and a Stop hook that has
+   * not answered yet suspends the turn instead of ending it. That is the
+   * only place a turn can be caught: the tool hooks freeze an agent that
+   * keeps reaching for tools, but one that simply stops talking slips past
+   * them, and a turn that has ended cannot be resumed — "it lifts the
+   * restriction yes, but it doesnt actually start the claude in the cli
+   * again" is that gap.
+   *
+   * Measured on 2.1.258: hold the Stop hook, then answer with
+   * `{decision:"block", reason}` and the model carries the SAME turn on,
+   * reading the reason. Which is exactly "it says its been unpaused, then it
+   * picks up RIGHT where it stopped."
+   */
+  parsed?.hook_event_name === "Stop";
 } catch {
 }
 if (wantsReply) {

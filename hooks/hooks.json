@@ -39,7 +39,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/relay.mjs\""
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/relay.mjs\"",
+            "timeout": 900
           }
         ]
       }
