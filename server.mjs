@@ -39731,7 +39731,13 @@ async function ingest(line, conn) {
       }
       const why = await holdWhilePaused(conn);
       if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
-      return { systemMessage: `Floor \u2014 ${RESUMED_NOTICE}` };
+      return {
+        systemMessage: `Floor \u2014 ${RESUMED_NOTICE}`,
+        hookSpecificOutput: {
+          hookEventName: "PostToolUse",
+          additionalContext: `${RESUMED_NOTICE} This came from the room, so the hold is over and you are free to run again \u2014 carry on from exactly where you stopped.`
+        }
+      };
     }
     return {};
   }
@@ -39761,7 +39767,20 @@ async function ingest(line, conn) {
            * "error" made a successful unpause look like a failure. The person
            * has already been told by `systemMessage`; this is for the model.
            */
-          reason: `Pick up exactly where you stopped and finish what you were doing. Do not start over and do not summarise.`
+          /**
+           * This has to SAY it is the unpause, and that is not decoration.
+           *
+           * `systemMessage` goes to the person; `reason` is the only thing
+           * the model reads. A version of this carried only the instruction —
+           * "pick up exactly where you stopped" — to avoid printing the notice
+           * twice, and the model, holding PAUSED_NOTICE's "nothing runs until
+           * somebody unpauses it in the room", read a bare instruction as
+           * something trying to talk it round: "Still paused. The stop hook
+           * isn't an unpause — that has to come from the room — and retrying
+           * would be working around it." It was obeying us. The lift has to
+           * announce itself in the same channel the pause was announced in.
+           */
+          reason: `${RESUMED_NOTICE} This message IS that unpause and it comes from the room \u2014 the hold is over and you are free to run again. Pick up exactly where you stopped and finish what you were doing. Do not start over and do not summarise.`
         };
       }
       return {};
@@ -39876,7 +39895,7 @@ function holdWhilePaused(conn) {
     }
   });
 }
-var PAUSED_NOTICE = "The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else.";
+var PAUSED_NOTICE = 'The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else. You will be told when it lifts \u2014 a Floor message beginning "The room unpaused this agent" IS the lift, and the moment you see one you are free to carry straight on.';
 var RESUMED_NOTICE = "The room unpaused this agent. Carrying on from exactly where it stopped.";
 var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
 async function guardWrite(payload, conn) {
@@ -39921,10 +39940,11 @@ ${FENCE}
     if (!note && !extra && !news && !unpaused) return {};
     const out = {};
     if (unpaused) out.systemMessage = `Floor \u2014 ${unpaused}`;
-    if (note || extra || news) {
+    const lifted = unpaused ? `${unpaused} This came from the room, so the hold is over and you are free to run again \u2014 carry on from exactly where you stopped.` : null;
+    if (lifted || note || extra || news) {
       out.hookSpecificOutput = {
         hookEventName: "PreToolUse",
-        additionalContext: [extra, news, note].filter(Boolean).join("\n\n")
+        additionalContext: [lifted, extra, news, note].filter(Boolean).join("\n\n")
       };
     }
     return out;
