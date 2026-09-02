@@ -39727,6 +39727,7 @@ async function ingest(line, conn) {
       }
       const why = await holdWhilePaused(conn);
       if (why !== "resumed") return { systemMessage: `Floor \u2014 ${holdEnded(why)}` };
+      return { systemMessage: `Floor \u2014 ${RESUMED_NOTICE}` };
     }
     return {};
   }
@@ -39839,8 +39840,10 @@ function holdWhilePaused(conn) {
   });
 }
 var PAUSED_NOTICE = "The room paused this agent, interrupting whatever was running. Nothing further runs here until somebody unpauses it in the room, and it carries on from this point when they do. Do not work around it and do not start anything else.";
+var RESUMED_NOTICE = "The room unpaused this agent. Carrying on from exactly where it stopped.";
 var holdEnded = (why) => why === "expired" ? "This agent was paused from the room and stayed paused longer than a turn can be held open, so the turn ended here. Unpausing will not restart it \u2014 say anything to pick up where it stopped." : here.stopped ?? "This agent was paused from the room.";
 async function guardWrite(payload, conn) {
+  let unpaused = null;
   if (here.stopped) return halt(here.stopped);
   if (here.paused) {
     if (!here.pauseSaid) {
@@ -39856,6 +39859,7 @@ async function guardWrite(payload, conn) {
     }
     const why = await holdWhilePaused(conn);
     if (why !== "resumed") return halt(holdEnded(why));
+    unpaused = RESUMED_NOTICE;
   }
   const directions = () => {
     if (!here.pendingDirections.length) return null;
@@ -39877,13 +39881,16 @@ ${FENCE}
   const allow = (extra) => {
     const note = directions();
     const news = notices();
-    if (!note && !extra && !news) return {};
-    return {
-      hookSpecificOutput: {
+    if (!note && !extra && !news && !unpaused) return {};
+    const out = {};
+    if (unpaused) out.systemMessage = `Floor \u2014 ${unpaused}`;
+    if (note || extra || news) {
+      out.hookSpecificOutput = {
         hookEventName: "PreToolUse",
         additionalContext: [extra, news, note].filter(Boolean).join("\n\n")
-      }
-    };
+      };
+    }
+    return out;
   };
   const intent = writeIntentFromTool(
     payload.tool_name,
@@ -39897,6 +39904,7 @@ ${FENCE}
     const why = intent.why.slice(0, 2).join("; ");
     if (process.env.FLOOR_STRICT_WRITES) {
       return {
+        ...unpaused ? { systemMessage: `Floor \u2014 ${unpaused}` } : {},
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
@@ -39935,6 +39943,7 @@ ${FENCE}
   const rest = held.length > 1 ? ` (and ${held.length - 1} more)` : "";
   debug(`denied: ${one.path} held by @${one.holder}`);
   return {
+    ...unpaused ? { systemMessage: `Floor \u2014 ${unpaused}` } : {},
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
