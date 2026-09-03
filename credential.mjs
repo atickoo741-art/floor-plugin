@@ -21679,6 +21679,7 @@ async function device() {
     }
   });
   const saved = read();
+  let reregistered = false;
   if (saved?.refresh_token) {
     const { data: data2, error: error2 } = await client.auth.refreshSession({
       refresh_token: saved.refresh_token
@@ -21689,9 +21690,11 @@ async function device() {
         client,
         userId: data2.session.user.id,
         returning: true,
+        reregistered: false,
         anonymous: data2.session.user.is_anonymous !== false
       };
     }
+    reregistered = true;
     process.stderr.write("floor: stored session expired, registering this machine again\n");
   }
   const { data, error } = await client.auth.signInAnonymously();
@@ -21703,6 +21706,7 @@ async function device() {
     client,
     userId: data.user.id,
     returning: false,
+    reregistered,
     anonymous: data.user.is_anonymous !== false
   };
 }
@@ -21711,7 +21715,7 @@ var paths = { DIR, SESSION, ROOM, SOCK };
 // packages/plugin/src/git.mjs
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir3, tmpdir } from "node:os";
 import { dirname as dirname2, join as join3 } from "node:path";
 import { fileURLToPath } from "node:url";
 

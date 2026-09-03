@@ -11,7 +11,8 @@
     "./commands/sync.md",
     "./commands/open.md",
     "./commands/status.md",
-    "./commands/leave.md"
+    "./commands/leave.md",
+    "./commands/auto.md"
   ],
   "hooks": "./hooks/hooks.json"
 }

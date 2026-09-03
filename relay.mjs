@@ -126,6 +126,11 @@ try {
    * `{decision:"block", reason}` and the model carries the SAME turn on,
    * reading the reason. Which is exactly "it says its been unpaused, then it
    * picks up RIGHT where it stopped."
+   *
+   * The same block now also hands over the next task on the room's list, so
+   * a turn ending is where work changes hands as well as where a pause
+   * lifts. Both ride this one reply for the same reason: it is the only
+   * moment a finished turn can be talked out of finishing.
    */
   parsed?.hook_event_name === "Stop";
 } catch {
