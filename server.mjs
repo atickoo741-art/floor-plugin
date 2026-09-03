@@ -38065,7 +38065,7 @@ var SupabaseClient = class {
     var _await$this$_getSessi;
     return (_await$this$_getSessi = await _this2._getSessionToken()) !== null && _await$this$_getSessi !== void 0 ? _await$this$_getSessi : _this2.supabaseKey;
   }
-  _initSupabaseAuthClient({ autoRefreshToken, persistSession, detectSessionInUrl, storage, userStorage, storageKey, flowType, lock, debug: debug2, throwOnError, experimental, lockAcquireTimeout, skipAutoInitialize }, headers, fetch$1) {
+  _initSupabaseAuthClient({ autoRefreshToken, persistSession, detectSessionInUrl, storage, userStorage, storageKey, flowType, lock, debug: debug3, throwOnError, experimental, lockAcquireTimeout, skipAutoInitialize }, headers, fetch$1) {
     const authHeaders = {
       Authorization: `Bearer ${this.supabaseKey}`,
       apikey: `${this.supabaseKey}`
@@ -38081,7 +38081,7 @@ var SupabaseClient = class {
       userStorage,
       flowType,
       lock,
-      debug: debug2,
+      debug: debug3,
       throwOnError,
       experimental,
       fetch: fetch$1,
@@ -38917,6 +38917,127 @@ function writeIntentFromTool(toolName, input, cwd, root) {
       return { paths: [], unknown: true, why: [`${toolName} is a tool Floor does not know`] };
   }
 }
+var WHOLE_TREE = /* @__PURE__ */ new Set([
+  "make",
+  "cmake",
+  "ninja",
+  "bazel",
+  "gradle",
+  "mvn",
+  "ant",
+  "npm",
+  "npx",
+  "pnpm",
+  "yarn",
+  "bun",
+  "cargo",
+  "go",
+  "dotnet",
+  "pip",
+  "pip3",
+  "poetry",
+  "uv",
+  "bundle",
+  "composer",
+  "gem",
+  "tsc",
+  "webpack",
+  "rollup",
+  "vite",
+  "esbuild",
+  "swc",
+  "babel",
+  "prettier",
+  "eslint",
+  "black",
+  "gofmt",
+  "rustfmt",
+  "ruff",
+  "pytest",
+  "jest",
+  "vitest",
+  "mocha",
+  "tox",
+  "nox"
+]);
+function needsWholeTree(cmd = "") {
+  for (const seg of segments(cmd)) {
+    const toks = tokens(seg);
+    if (!toks.length) continue;
+    const { prog } = leadingProgram(toks);
+    if (prog && WHOLE_TREE.has(prog)) return true;
+  }
+  return false;
+}
+var PATTERN_FIRST = /^(grep|egrep|fgrep|rg|ag|ack)$/;
+var PATTERN_IN_FLAG = /^(-e|-f|--regexp|--file)$/;
+var LOOKS_LIKE_PATH = /\/|\.[A-Za-z0-9_]+$/;
+function literalPrefix(pattern = "") {
+  const cut = pattern.search(/[*?\[\]{}]/);
+  const head2 = cut === -1 ? pattern : pattern.slice(0, cut);
+  const at = head2.lastIndexOf("/");
+  return at === -1 ? "" : head2.slice(0, at);
+}
+function readsInCommand(cmd = "") {
+  const out2 = [];
+  for (const seg of segments(cmd)) {
+    const toks = tokens(seg);
+    if (!toks.length) continue;
+    const { prog, at } = leadingProgram(toks);
+    if (!prog) continue;
+    const namesFiles = READ_ONLY.has(prog) || prog === "find";
+    const ops = operandsOf(toks, at, ["-e", "-f", "--regexp", "--file", "--include", "--exclude"]);
+    const skip = PATTERN_FIRST.test(prog) && !toks.some((t) => PATTERN_IN_FLAG.test(t ?? "")) ? 1 : 0;
+    for (const p of ops.slice(skip)) {
+      if (!p) continue;
+      if (namesFiles || LOOKS_LIKE_PATH.test(p)) out2.push(p);
+    }
+  }
+  return out2;
+}
+function referencedPaths(toolName = "", input = {}, cwd = "", root = "") {
+  const i = Object(input ?? {});
+  const raw = [];
+  switch (toolName) {
+    case "Read":
+    case "Edit":
+    case "Write":
+    case "MultiEdit":
+      raw.push(String(i.file_path ?? ""));
+      break;
+    case "NotebookEdit":
+      raw.push(String(i.notebook_path ?? ""));
+      break;
+    case "Glob":
+      raw.push(String(i.path ?? ""));
+      raw.push(literalPrefix(String(i.pattern ?? "")));
+      break;
+    case "Grep":
+      raw.push(String(i.path ?? ""));
+      break;
+    case "Bash":
+    case "BashOutput":
+      for (const p of readsInCommand(String(i.command ?? ""))) raw.push(p);
+      break;
+    default:
+      break;
+  }
+  for (const p of writeIntentFromTool(toolName, input, cwd, root).paths) raw.push(p);
+  const seen = /* @__PURE__ */ new Set();
+  const kept = [];
+  for (const r of raw) {
+    if (!r) continue;
+    const rel = !cwd && !root ? normalisePath(r) : repoRelative(r, cwd, root || cwd);
+    if (!rel) continue;
+    const clean = rel.replace(/\/\*\*$/, "").replace(/\/+$/, "");
+    if (!clean || clean === "." || clean.startsWith("..")) continue;
+    if (/[*?\[\]{}]/.test(clean)) continue;
+    if (seen.has(clean)) continue;
+    seen.add(clean);
+    kept.push(clean);
+  }
+  return kept;
+}
 
 // packages/plugin/src/staleness.mjs
 function writtenElsewhere(row, myAgentId) {
@@ -39329,11 +39450,196 @@ async function configureCheckout(dir) {
   if (!helper) return false;
   return pointAtHelper(dir, helper);
 }
+var debug = (m) => {
+  if (process.env.FLOOR_DEBUG) process.stderr.write(`floor: git: ${m}
+`);
+};
+var said = (e) => String(e?.stderr || e?.stdout || e?.message || e).trim();
+var lastLine = (t) => t.split("\n").map((s) => s.trim()).filter(Boolean).pop() ?? "";
+var NO_SUCH_REF = /couldn't find remote ref|no such ref|remote ref .* not found/i;
+var FILTER_IGNORED = /filtering not recognized by server/i;
+var FILTER_REFUSED = /filter|partial ?clone/i;
 function sameRepo(remote, fullName) {
   const full = String(remote ?? "").trim().replace(/^git@[^:]+:/, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
   return full.toLowerCase() === fullName.toLowerCase();
 }
-async function ensureCheckout(fullName, branch) {
+function tidy(p, dir) {
+  let s = String(p ?? "").trim().replace(/\\/g, "/");
+  if (!s) return "";
+  if (dir && s.startsWith(`${dir}/`)) s = s.slice(dir.length + 1);
+  s = s.replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
+  return s === "." ? "" : s;
+}
+var parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+async function treeEntry(dir, rev, p) {
+  try {
+    const line = out(await git2(["ls-tree", rev, "--", p], dir));
+    return line ? line.split(/\s+/)[1] ?? null : null;
+  } catch {
+    return null;
+  }
+}
+async function coneFor(dir, paths2, rev) {
+  const list = Array.isArray(paths2) ? paths2 : paths2 == null ? [] : [paths2];
+  const asked = [...new Set(list.map((p) => tidy(p, dir)).filter(Boolean))];
+  const dirs = [];
+  const missing = [];
+  for (const p of asked) {
+    const kind = await treeEntry(dir, rev, p);
+    if (!kind) missing.push(p);
+    const d = kind === "tree" ? p : parentOf(p);
+    if (d && !dirs.includes(d)) dirs.push(d);
+  }
+  return { asked, dirs: narrow(dirs), missing };
+}
+function narrow(dirs) {
+  const sorted = [...new Set(dirs)].sort();
+  return sorted.filter((d) => !sorted.some((o) => o !== d && d.startsWith(`${o}/`)));
+}
+async function coneState(dir) {
+  const cfg = async (k) => {
+    try {
+      return out(await git2(["config", "--get", k], dir)).toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+  if (await cfg("core.sparsecheckout") !== "true") return { sparse: false, cone: null };
+  if (await cfg("core.sparsecheckoutcone") !== "true") return { sparse: true, cone: null };
+  let cone = [];
+  try {
+    cone = out(await git2(["sparse-checkout", "list"], dir)).split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch {
+  }
+  return { sparse: true, cone };
+}
+async function isPartial(dir) {
+  try {
+    return out(await git2(["config", "--get", "remote.origin.promisor"], dir)).toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+async function notPartial(dir) {
+  for (const k of ["remote.origin.promisor", "remote.origin.partialclonefilter"]) {
+    try {
+      await git2(["config", "--unset-all", k], dir);
+    } catch {
+    }
+  }
+}
+async function shallowFetch(dir, cfg, ref, wantFilter) {
+  const go = async (filtered) => {
+    const r = await git2([
+      ...cfg,
+      "fetch",
+      "--depth=1",
+      ...filtered ? ["--filter=blob:none"] : [],
+      "--no-tags",
+      "origin",
+      ref
+    ], dir);
+    return String(r?.stderr ?? "");
+  };
+  if (wantFilter) {
+    try {
+      if (!FILTER_IGNORED.test(await go(true))) return true;
+      debug(`origin ignored --filter fetching ${ref}: this is a full shallow fetch`);
+      return false;
+    } catch (e) {
+      if (!FILTER_REFUSED.test(said(e))) throw e;
+      debug(`origin refused --filter fetching ${ref} (${lastLine(said(e))}); retrying shallow`);
+    }
+  }
+  await go(false);
+  return false;
+}
+async function defaultBranch(dir, cfg) {
+  const text = out(await git2([...cfg, "ls-remote", "--symref", "origin", "HEAD"], dir));
+  const m = text.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m);
+  return m ? m[1] : null;
+}
+async function makeCheckout(dir, fullName, branch, cone, cfg, helper) {
+  mkdirSync3(dir, { recursive: true });
+  try {
+    await git2(["init", ...branch ? ["-b", branch] : [], "."], dir);
+  } catch {
+    await git2(["init", "."], dir);
+    if (branch) await git2(["symbolic-ref", "HEAD", `refs/heads/${branch}`], dir);
+  }
+  await git2(["remote", "add", "origin", `https://github.com/${fullName}.git`], dir);
+  await git2(["config", "remote.origin.promisor", "true"], dir);
+  await git2(["config", "remote.origin.partialclonefilter", "blob:none"], dir);
+  await git2(["config", "remote.origin.tagOpt", "--no-tags"], dir);
+  await pointAtHelper(dir, helper);
+  let want = branch;
+  if (!want) want = await defaultBranch(dir, cfg);
+  let onRemote = true;
+  let filtered = false;
+  let empty = false;
+  try {
+    filtered = await shallowFetch(dir, cfg, want ?? "HEAD", true);
+  } catch (e) {
+    if (!NO_SUCH_REF.test(said(e))) throw e;
+    onRemote = false;
+  }
+  if (!onRemote) {
+    try {
+      filtered = await shallowFetch(dir, cfg, "HEAD", true);
+    } catch (e) {
+      if (!NO_SUCH_REF.test(said(e))) throw e;
+      const heads = out(await git2([...cfg, "ls-remote", "--heads", "origin"], dir));
+      if (heads) {
+        throw new Error(
+          `${fullName} has branches, but neither ${want} nor its default HEAD could be fetched`
+        );
+      }
+      empty = true;
+      debug(`${fullName} has no commits yet; ${want} starts here`);
+    }
+  }
+  if (!filtered) await notPartial(dir);
+  if (empty) {
+    return { filtered: false, cone: null, local: true, on: want ?? null };
+  }
+  const { dirs } = await coneFor(dir, cone, "FETCH_HEAD");
+  await git2(["sparse-checkout", "init", "--cone"], dir);
+  if (dirs.length) await git2(["sparse-checkout", "set", ...dirs], dir);
+  const on = want ?? out(await git2(["symbolic-ref", "--short", "HEAD"], dir));
+  await git2(["checkout", "-B", on, "FETCH_HEAD"], dir);
+  if (onRemote) {
+    try {
+      await git2(["branch", "--set-upstream-to", `origin/${on}`, on], dir);
+    } catch {
+    }
+  }
+  return { filtered, cone: dirs, local: !onRemote, on };
+}
+async function widenCone(dir, paths2) {
+  const state = await coneState(dir);
+  const { asked, dirs, missing } = await coneFor(dir, paths2, "HEAD");
+  const answer = { widened: false, cone: state.cone, added: [], missing, why: null };
+  if (!state.sparse) return { ...answer, cone: null, why: "this checkout is not sparse" };
+  if (state.cone === null) {
+    return { ...answer, cone: null, why: "this checkout uses pattern-mode sparse-checkout" };
+  }
+  if (!asked.length) return answer;
+  const have = state.cone;
+  const covered = (p) => have.some((h) => p === h || p.startsWith(`${h}/`));
+  const added = dirs.filter((d) => !covered(d));
+  if (!added.length) return answer;
+  const next = narrow([...have, ...added]);
+  try {
+    await git2(["sparse-checkout", "set", ...next], dir);
+  } catch (e) {
+    const why = lastLine(said(e)) || "git refused to widen the cone";
+    debug(`widenCone(${added.join(", ")}): ${why}`);
+    return { ...answer, why };
+  }
+  debug(`cone widened by ${added.join(", ")}`);
+  return { widened: true, cone: next, added, missing, why: null };
+}
+async function ensureCheckout(fullName, branch, cone = []) {
   const [owner, name] = fullName.split("/");
   if (!owner || !name) throw new Error(`not a repository name: ${fullName}`);
   const dir = join3(REPOS, owner, name);
@@ -39348,10 +39654,23 @@ async function ensureCheckout(fullName, branch) {
     "credential.useHttpPath=true"
   ];
   let fresh = false;
+  let local = false;
+  let filtered = false;
+  let cones = null;
   if (!existsSync2(join3(dir, ".git"))) {
     if (existsSync2(dir)) throw new Error(`${dir} exists and is not a git repository`);
     mkdirSync3(dirname3(dir), { recursive: true });
-    await git2(["clone", ...cfg, "--no-tags", `https://github.com/${fullName}.git`, dir]);
+    try {
+      const made = await makeCheckout(dir, fullName, branch, cone, cfg, helper);
+      ({ filtered, local } = made);
+      cones = made.cone;
+    } catch (e) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+      }
+      throw e;
+    }
     fresh = true;
   } else {
     const { stdout } = await git2(["remote", "get-url", "origin"], dir);
@@ -39359,9 +39678,11 @@ async function ensureCheckout(fullName, branch) {
       throw new Error(`${dir} is a checkout of something else (${stdout.trim()})`);
     }
     await pointAtHelper(dir, helper);
+    filtered = await isPartial(dir);
+    cones = (await coneState(dir)).cone;
+    if (cone?.length) cones = (await widenCone(dir, cone)).cone;
   }
-  let local = false;
-  if (branch) {
+  if (branch && !fresh) {
     const { stdout: status } = await git2(["status", "--porcelain"], dir);
     const { stdout: onRaw } = await git2(["rev-parse", "--abbrev-ref", "HEAD"], dir);
     const on = onRaw.trim();
@@ -39383,18 +39704,22 @@ async function ensureCheckout(fullName, branch) {
         await git2(onRemote ? ["checkout", "-b", branch, `origin/${branch}`] : ["checkout", "-b", branch], dir);
       }
       local = !onRemote;
-    } else if (!fresh) {
+    } else {
       try {
         await git2(["pull", "--ff-only", "origin", branch], dir);
       } catch {
       }
     }
   }
-  return { dir, fresh, branch: branch ?? null, local };
+  return { dir, fresh, branch: branch ?? null, local, filtered, cone: cones };
 }
 
 // packages/plugin/src/server.mjs
-import { unlinkSync, existsSync as existsSync3, mkdirSync as mkdirSync4, chmodSync as chmodSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { unlinkSync, existsSync as existsSync3, mkdirSync as mkdirSync4, chmodSync as chmodSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3, rmSync as rmSync2 } from "node:fs";
+import { join as joinPath } from "node:path";
+import { execFile as execFile4 } from "node:child_process";
+import { promisify as promisify4 } from "node:util";
+var runGit = promisify4(execFile4);
 var here = {
   client: null,
   userId: null,
@@ -39599,7 +39924,62 @@ var here = {
    * session, and nothing said so. Null until connect; paths.mjs falls back to
    * cwd, which is what it always did.
    */
-  repoRoot: null
+  repoRoot: null,
+  /**
+   * The room's repository and branch, `{ full, branch }`, once anything has
+   * looked. Cached because the cone path and floor_find both need it and both
+   * run where a round trip to PostgREST is not affordable.
+   */
+  repo: null,
+  /**
+   * ------------------------------------------------------------------------
+   * The sparse cone of this checkout, and the reason any of this exists.
+   *
+   * Since Phase 4 a joiner gets a CONE checkout: the root's files and nothing
+   * else, a few hundred kilobytes of a repository of any size. Everything
+   * outside that cone is not on disk — and on disk, a file outside the cone is
+   * indistinguishable from a file the repository does not have. `existsSync`
+   * is false for both, `grep -r` finds neither, `ls` says no such directory
+   * for both.
+   *
+   * So a checkout that saves ninety-seven per cent of the bytes can tell the
+   * agent working in it that the code is not there, and an agent told that
+   * writes a second copy of it. CLAUDE.md records four shipped bugs of exactly
+   * this shape from RLS empty reads — a denial that looks like an absence —
+   * and this is that bug in the filesystem. **A sparse checkout must never lie
+   * to the agent working in it.**
+   *
+   * Two answers, and they are complementary rather than alternatives. Here:
+   * every path a tool call names is brought into the cone BEFORE the call
+   * runs, so the question is never asked of a tree that cannot answer it. And
+   * `floor_find`, below: discovery goes to the repository over the API, so
+   * "does X exist" is answered by the repository rather than by this disk.
+   *
+   *   coneKnown  whether anything has looked yet. Distinguishes "no cone" from
+   *              "not asked", which is the same distinction this whole feature
+   *              is about, one level up.
+   *   cone       the cone's directories, or null for a checkout with NO cone —
+   *              a full clone the person made themselves. null means nothing
+   *              is hidden here, not that the cone is empty.
+   *   coneFull   this checkout has been widened to the whole tree (phase 6).
+   *   coneSeen   paths already dealt with, so the common case costs nothing.
+   *   coneSaid   what has already been said about, so a missing path is
+   *              reported once rather than at every reference to it.
+   * ------------------------------------------------------------------------
+   */
+  coneKnown: false,
+  cone: null,
+  coneFull: false,
+  coneFullTried: false,
+  coneSeen: /* @__PURE__ */ new Set(),
+  coneSaid: /* @__PURE__ */ new Set(),
+  /**
+   * When to try widening again, after one failed. Not a permanent verdict:
+   * marking a path dealt with because the fetch for it flaked turns a network
+   * blip into a file that is missing for the rest of the session, which is
+   * this bug arriving through the door marked "error handling".
+   */
+  coneFailedUntil: 0
 };
 var say = (text) => ({ content: [{ type: "text", text }] });
 var FENCE = "----- FLOOR DIRECTION -----";
@@ -39618,7 +39998,7 @@ async function connect() {
   try {
     installHelper();
   } catch (e) {
-    debug(`credential helper: ${e?.message ?? e}`);
+    debug2(`credential helper: ${e?.message ?? e}`);
   }
   const { data: profile } = await client.from("profiles").select("full_name, colour").eq("id", userId).maybeSingle();
   here.name = profile?.full_name ?? null;
@@ -39655,7 +40035,7 @@ async function holdRoom(roomId) {
   }
   if (here.seat && here.roomId && here.roomId !== roomId) {
     const { error: error2 } = await here.client.rpc("release_seat", { p_room: here.roomId });
-    if (error2) debug(`could not release the old room's seat: ${error2.message}`);
+    if (error2) debug2(`could not release the old room's seat: ${error2.message}`);
     here.seat = false;
   }
   const channel = here.client.channel(`presence:${roomId}`, {
@@ -39688,6 +40068,7 @@ async function holdRoom(roomId) {
   here.roomSlug = slugs?.roomSlug ?? null;
   rememberRoom(roomId, here.roomTitle, slugs ?? void 0);
   void loadRepoNotes();
+  void learnCone();
   const { data: seat } = await here.client.rpc("take_seat", { p_room: roomId });
   if (seat?.ok === false) {
     here.seat = false;
@@ -39699,7 +40080,7 @@ async function holdRoom(roomId) {
   } else {
     here.seat = true;
     here.seatLost = null;
-    debug(seat?.fresh ? "seat taken" : "seat already held");
+    debug2(seat?.fresh ? "seat taken" : "seat already held");
   }
   await watchFeed(roomId);
   if (!ready) await drain();
@@ -39709,6 +40090,7 @@ async function settleRepo() {
   const { data: ws } = await here.client.from("workspaces").select("gh_full_name, branch, base_branch").eq("room_id", here.roomId).maybeSingle();
   if (!ws?.gh_full_name) return "";
   const want = ws.branch ?? ws.base_branch ?? null;
+  here.repo = { full: ws.gh_full_name, branch: want };
   const local = await repoState(here.cwd);
   if (local && local.repo.toLowerCase() === ws.gh_full_name.toLowerCase()) {
     const notes = [];
@@ -39719,7 +40101,7 @@ async function settleRepo() {
         );
       }
     } catch (e) {
-      debug(`configureCheckout: ${e?.message ?? e}`);
+      debug2(`configureCheckout: ${e?.message ?? e}`);
     }
     if (want && local.branch !== want) {
       notes.push(
@@ -39731,20 +40113,248 @@ async function settleRepo() {
 ${notes.join(". ").replace(/^./, (c) => c.toUpperCase())}.` : "";
   }
   try {
-    const { dir, fresh, local: branchIsLocal } = await ensureCheckout(ws.gh_full_name, want);
+    const { dir, fresh, local: branchIsLocal, filtered, cone } = await ensureCheckout(ws.gh_full_name, want);
     const cameFrom = local ? local.repo : "here";
     here.cwd = dir;
     here.repoRoot = await repoRoot(dir) ?? dir;
-    debug(`checkout ${fresh ? "cloned" : "found"} at ${dir}`);
+    here.coneKnown = true;
+    here.cone = cone;
+    here.coneFull = cone === null;
+    here.coneFullTried = false;
+    here.coneSeen.clear();
+    here.coneSaid.clear();
+    debug2(`checkout ${fresh ? "cloned" : "found"} at ${dir}`);
+    sayItIsPartial(cone, filtered);
     return `
 
-${fresh ? "Cloned" : "Found"} ${ws.gh_full_name}${want ? ` on ${want}` : ""} at ${dir}. Joining the room is what gave this machine access to it \u2014 nothing to set up on GitHub, and git push works from there while you are a member. Work from that directory: run \`cd ${dir}\` before anything else. This terminal now reports work from there, not from ${cameFrom}.` + (branchIsLocal ? ` The branch ${want} is not on the remote yet \u2014 it starts here and your first push publishes it.` : "");
+${fresh ? "Cloned" : "Found"} ${ws.gh_full_name}${want ? ` on ${want}` : ""} at ${dir}. Joining the room is what gave this machine access to it \u2014 nothing to set up on GitHub, and git push works from there while you are a member. Work from that directory: run \`cd ${dir}\` before anything else. This terminal now reports work from there, not from ${cameFrom}.` + (cone === null ? "" : ` It is a PARTIAL checkout \u2014 most of the repository is not on this disk yet, and Floor fetches each file as something reaches for it.` + (filtered === false ? ` github could not serve a partial clone, so this is a full shallow copy: everything came down at depth 1.` : "")) + (branchIsLocal ? ` The branch ${want} is not on the remote yet \u2014 it starts here and your first push publishes it.` : "");
   } catch (e) {
     const why = String(e?.stderr ?? e?.message ?? e).trim().split("\n").slice(-1)[0];
     return `
 
 The room works on ${ws.gh_full_name}, and this directory is ${local ? `${local.repo}` : "not a git repository"}. Floor tried to clone it for you and could not: ${why}. /floor:repo tries again.`;
   }
+}
+var CONE_RETRY_MS = 3e4;
+var widenBudget = () => {
+  const asked = Number(process.env.FLOOR_HOOK_TIMEOUT_MS);
+  const relay = Number.isFinite(asked) && asked > 0 ? Math.min(Math.max(asked, 1e3), 3e4) : 1500;
+  return Math.max(400, relay - 300);
+};
+function within(ms, work) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), ms);
+    t.unref?.();
+    work.then(
+      () => {
+        clearTimeout(t);
+        resolve(true);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(true);
+      }
+    );
+  });
+}
+function inCone(p) {
+  if (!here.coneKnown) return false;
+  if (here.cone === null || here.coneFull) return true;
+  return here.cone.some((h) => p === h || p.startsWith(`${h}/`));
+}
+async function widenTo(paths2, reads) {
+  const dir = here.repoRoot;
+  if (!dir || !paths2.length) return;
+  const failed = (why) => {
+    here.coneFailedUntil = Date.now() + CONE_RETRY_MS;
+    if (here.coneSaid.has(why)) return;
+    here.coneSaid.add(why);
+    here.notices.push(
+      `This checkout hides files and Floor cannot widen it to ${paths2.join(", ")}: ${why}. Files the repository HAS may be missing from this disk, so an empty grep or a "no such file" here is not evidence that something does not exist. Use floor_find to ask the repository before concluding anything is missing, and before writing a second copy of it.`
+    );
+  };
+  let r;
+  try {
+    r = await widenCone(dir, paths2);
+  } catch (e) {
+    debug2(`widen: ${e?.message ?? e}`);
+    failed(String(e?.message ?? e).split("\n").slice(-1)[0] || "git would not say why");
+    return;
+  }
+  here.coneKnown = true;
+  here.cone = r.cone;
+  if (r.cone === null) here.coneFull = true;
+  if (r.why) {
+    if (!/not sparse/i.test(r.why)) failed(r.why);
+    return;
+  }
+  here.coneFailedUntil = 0;
+  for (const p of paths2) here.coneSeen.add(p);
+  if (here.coneSeen.size > 4e3) here.coneSeen.clear();
+  if (r.added.length) debug2(`cone widened by ${r.added.join(", ")}`);
+  const gone = (r.missing ?? []).filter((p) => reads.includes(p) && !here.coneSaid.has(p));
+  if (gone.length) {
+    for (const p of gone) here.coneSaid.add(p);
+    const alsoNamed = paths2.filter((p) => !gone.includes(p));
+    here.notices.push(
+      `Floor checked the repository, not just this checkout: ${gone.join(", ")} ${gone.length > 1 ? "are" : "is"} not in it at HEAD on this branch. This is the repository's own answer \u2014 ${gone.length > 1 ? "those files are" : "that file is"} genuinely absent, rather than merely outside this sparse checkout.` + (alsoNamed.length ? ` ${alsoNamed.join(", ")} is on disk now.` : "")
+    );
+  }
+}
+async function learnCone() {
+  const dir = here.repoRoot;
+  if (here.coneKnown || !dir) return;
+  let r;
+  try {
+    r = await widenCone(dir, []);
+  } catch (e) {
+    debug2(`cone: ${e?.message ?? e}`);
+    return;
+  }
+  if (here.coneKnown || here.repoRoot !== dir) return;
+  here.coneKnown = true;
+  here.cone = r.cone;
+  here.coneFull = r.cone === null;
+  sayItIsPartial(r.cone, void 0);
+}
+async function topLevelDirs(dir) {
+  try {
+    const { stdout } = await runGit("git", ["ls-tree", "HEAD", "-d", "--name-only"], {
+      cwd: dir,
+      maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    });
+    return String(stdout).split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch (e) {
+    debug2(`ls-tree: ${e?.message ?? e}`);
+    return [];
+  }
+}
+async function widenWholeTree(why) {
+  if (here.coneFull || here.coneFullTried) return;
+  if (!here.repoRoot) return;
+  if (here.coneKnown && here.cone === null) return;
+  here.coneFullTried = true;
+  const dirs = await topLevelDirs(here.repoRoot);
+  if (!dirs.length) {
+    here.coneFull = true;
+    return;
+  }
+  let r;
+  try {
+    r = await widenCone(here.repoRoot, dirs);
+  } catch (e) {
+    debug2(`whole-tree widen: ${e?.message ?? e}`);
+    here.notices.push(
+      `${why} needs the whole repository on disk, and Floor could not check the rest of it out: ${String(e?.message ?? e).split("\n").slice(-1)[0]}. Most of this repository is still missing from this checkout, so a failure naming a file that is not there is the checkout, not the code.`
+    );
+    here.coneFullTried = false;
+    return;
+  }
+  here.coneKnown = true;
+  here.cone = r.cone;
+  if (r.why && !/not sparse/i.test(r.why)) {
+    here.notices.push(
+      `${why} needs the whole repository on disk and this checkout hides files: ${r.why}. A failure naming a file that is not there is the checkout, not the code.`
+    );
+    here.coneFullTried = false;
+    return;
+  }
+  here.coneFull = true;
+  if (!r.widened) return;
+  here.notices.push(
+    `Floor has just checked the REST of this repository out into this directory, because ${why} reads files it does not name and this was a partial checkout. Everything is on disk now \u2014 an empty grep from here on means the repository does not have it.`
+  );
+  const agentId = await ensureAgent();
+  if (agentId) {
+    void noteUnclaimedWrite(
+      agentId,
+      why,
+      `${why} reads files it does not name, so Floor checked the rest of the repository out into this terminal's partial checkout`
+    );
+  }
+}
+var widening = null;
+function widenSoon(paths2, reads) {
+  const work = (widening ?? Promise.resolve()).then(() => widenTo(paths2, reads)).catch(() => {
+  }).finally(() => {
+    if (widening === work) widening = null;
+  });
+  widening = work;
+  return work;
+}
+function outsideCone(refs) {
+  if (!here.repoRoot) return [];
+  if (here.coneKnown && (here.cone === null || here.coneFull)) return [];
+  if (Date.now() < here.coneFailedUntil) return [];
+  const want = [];
+  for (const p of refs) {
+    if (here.coneSeen.has(p)) continue;
+    if (inCone(p)) {
+      here.coneSeen.add(p);
+      continue;
+    }
+    want.push(p);
+  }
+  return want.slice(0, 32);
+}
+function sayItIsPartial(cone, filtered) {
+  if (cone === null) return;
+  if (here.coneSaid.has("partial")) return;
+  here.coneSaid.add("partial");
+  const held = cone.length ? `: ${cone.join(", ")}` : ", none";
+  here.notices.push(
+    `THIS CHECKOUT IS PARTIAL, and it will mislead you if you forget it. Floor checked out the repository sparsely \u2014 the root's own files, plus whatever has been widened into it since (as of now${held}) \u2014 so **a file outside that is not on this disk at all**. \`ls\`, \`grep -r\`, \`find\` and \`cat\` cannot tell a file the repository is hiding from one it does not have: both are "no such file".
+
+So: an empty search result here is NOT evidence that something does not exist, and it is never a reason to write a second copy of code that is already in the repository.
+
+- Naming a path is enough. Floor widens the checkout to any file or directory a tool call names, before the call runs, so reading or editing a path you already know works normally.
+- To find out WHETHER something exists, call floor_find. It searches the whole repository over GitHub rather than this disk, and it says plainly when it could not ask \u2014 which is different from finding nothing.
+- A command that needs the whole tree (npm test, npm run build, make) makes Floor check the rest of it out once, and it says so when it does.` + (filtered === false ? `
+
+github could not serve a partial clone, so the objects all came down at depth 1 \u2014 but the working tree is still sparse, so everything above still holds.` : "")
+  );
+}
+async function floorMadeCheckout() {
+  const dir = here.repoRoot;
+  if (!dir || !here.roomId || !here.client) return null;
+  const repo = await roomRepo();
+  if (!repo?.full) return null;
+  const [owner, name] = repo.full.split("/");
+  if (!owner || !name) return null;
+  if (dir !== joinPath(REPOS, owner, name)) return null;
+  return { dir, repo: repo.full, branch: repo.branch ?? null };
+}
+async function removeCheckout(checkout) {
+  if (!checkout) return "";
+  const { dir, repo, branch } = checkout;
+  const keep = (why) => ` The checkout Floor made at ${dir} is still there \u2014 ${why}. Delete it yourself when you are done with it.`;
+  let state = null;
+  try {
+    state = await repoState(dir);
+  } catch (e) {
+    debug2(`leave: ${e?.message ?? e}`);
+  }
+  if (!state) return keep(`Floor could not read it to check whether anything in it is unsaved`);
+  if (state.dirty) return keep(`it has uncommitted or untracked changes in it`);
+  const on = branch ?? state.branch;
+  const d = await branchDistance(dir, on);
+  if (!d.reachable) {
+    return keep(`Floor could not reach origin/${on} to check whether anything in it is unpushed, and it will not delete work it cannot account for`);
+  }
+  if (d.ahead) {
+    return keep(`it has ${d.ahead} commit${d.ahead > 1 ? "s" : ""} that ${d.ahead > 1 ? "are" : "is"} not on origin/${on} yet`);
+  }
+  try {
+    rmSync2(dir, { recursive: true, force: true });
+  } catch (e) {
+    debug2(`leave: could not remove ${dir}: ${e?.message ?? e}`);
+    return keep(`Floor could not remove it: ${String(e?.message ?? e).split("\n").slice(-1)[0]}`);
+  }
+  here.cwd = process.env.FLOOR_CWD ?? process.cwd();
+  here.repoRoot = await repoRoot(here.cwd) ?? null;
+  debug2(`removed ${dir}`);
+  return ` Floor also removed the checkout it made for this room, at ${dir} \u2014 everything in it was committed and pushed, and ${repo} is on GitHub. If your shell is still inside that directory, \`cd\` out of it.`;
 }
 async function roomFromSlugs(db, roomSlug, teamSlug) {
   const { data } = await db.from("rooms").select("id, title, teams!inner(slug)").eq("slug", roomSlug);
@@ -39785,6 +40395,13 @@ async function leftRoom(reason) {
   here.autoFailed = null;
   here.declined.clear();
   here.contested.clear();
+  here.repo = null;
+  here.coneKnown = false;
+  here.cone = null;
+  here.coneFull = false;
+  here.coneFullTried = false;
+  here.coneSeen.clear();
+  here.coneSaid.clear();
   here.announce.push(reason);
   releaseHolds("stopped");
   watchingCode = null;
@@ -39837,10 +40454,10 @@ async function makeAgent() {
       here.announce.push(
         error3 ? `This agent was paused from the room before this session started, and Floor could not lift it: ${error3.message}. Unpause it in the room.` : "This agent was paused from the room before this session started. A new session starts unpaused, so that has been lifted and the room has been told."
       );
-      debug(error3 ? `could not clear stale pause: ${error3.message}` : "stale pause cleared");
+      debug2(error3 ? `could not clear stale pause: ${error3.message}` : "stale pause cleared");
     }
     const { data: woke } = await db.rpc("wake_agent", { p_agent: here.agentId });
-    if (mine[0].asleep_at) debug(`woke after ${woke?.sleptSeconds ?? "?"}s`);
+    if (mine[0].asleep_at) debug2(`woke after ${woke?.sleptSeconds ?? "?"}s`);
     return here.agentId;
   }
   const { data: taken } = await db.from("agents").select("name").eq("room_id", here.roomId);
@@ -39894,7 +40511,7 @@ async function pushWorkspace() {
       `floor: workspace update failed: ${error2?.message ?? data?.message ?? data?.reason}
 `
     );
-  } else debug(`workspace: ${snap.paths.length} files, ${snap.diff.length} bytes`);
+  } else debug2(`workspace: ${snap.paths.length} files, ${snap.diff.length} bytes`);
 }
 async function listen() {
   mkdirSync4(paths.DIR, { recursive: true });
@@ -39942,7 +40559,7 @@ floor: remove it, or set FLOOR_HOME to a directory you own.
   });
   srv.unref?.();
 }
-var debug = (m) => {
+var debug2 = (m) => {
   if (process.env.FLOOR_DEBUG) process.stderr.write(`floor: ${m}
 `);
 };
@@ -39952,7 +40569,7 @@ var ready = false;
 async function drain() {
   ready = true;
   const queued = waiting.splice(0, waiting.length);
-  if (queued.length) debug(`draining ${queued.length} queued`);
+  if (queued.length) debug2(`draining ${queued.length} queued`);
   for (const p of queued) await send(p);
 }
 var boundSession = null;
@@ -39985,7 +40602,7 @@ async function retakeSeat() {
     here.stopped = null;
     here.stoppedKind = null;
   }
-  debug("seat taken back");
+  debug2("seat taken back");
   return true;
 }
 function keepSeat() {
@@ -39998,13 +40615,13 @@ function keepSeat() {
   if (now - touched < TOUCH_EVERY) return;
   touched = now;
   void here.client.rpc("touch_seat", { p_room: here.roomId }).then(({ error: error2 }) => {
-    if (error2) debug(`touch_seat: ${error2.message}`);
+    if (error2) debug2(`touch_seat: ${error2.message}`);
   });
   if (here.task && here.agentId) {
     void here.client.rpc("touch_task", { p_task: here.task.id, p_agent: here.agentId }).then(({ data, error: error2 }) => {
-      if (error2) return debug(`touch_task: ${error2.message}`);
+      if (error2) return debug2(`touch_task: ${error2.message}`);
       if (data?.ok === false) {
-        debug(`task ${here.task?.id} is no longer ours`);
+        debug2(`task ${here.task?.id} is no longer ours`);
         here.task = null;
       }
     });
@@ -40038,8 +40655,76 @@ async function gitCredential(op, repo) {
   }
   if (minted.ok !== true) return minted;
   gitTokens.set(key, { token: minted.token, expiresAt: minted.expiresAt });
-  debug(`git token for ${repo}, good until ${minted.expiresAt}`);
+  debug2(`git token for ${repo}, good until ${minted.expiresAt}`);
   return { ok: true, token: minted.token, expiresAt: minted.expiresAt };
+}
+var GITHUB_API = "https://api.github.com";
+async function githubGet(repo, path, accept) {
+  const cred = await gitCredential("get", repo);
+  if (cred?.ok !== true) {
+    return {
+      ok: false,
+      why: `Floor could not get a token for ${repo} (${cred?.reason ?? "no reason given"}${cred?.message ? `: ${cred.message}` : ""})`
+    };
+  }
+  let res;
+  try {
+    res = await fetch(`${GITHUB_API}${path}`, {
+      headers: {
+        Authorization: `Bearer ${cred.token}`,
+        Accept: accept ?? "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "floor-plugin"
+      }
+    });
+  } catch (e) {
+    return { ok: false, why: `Floor could not reach GitHub: ${e?.message ?? e}` };
+  }
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+  }
+  if (!res.ok) {
+    const msg = typeof body?.message === "string" ? body.message : `HTTP ${res.status}`;
+    return { ok: false, why: `GitHub refused the request: ${msg}`, status: res.status };
+  }
+  return { ok: true, body };
+}
+var treeCache = /* @__PURE__ */ new Map();
+var TREE_TTL = 6e4;
+async function repoTree(repo, ref) {
+  const key = `${repo}@${ref}`;
+  const have = treeCache.get(key);
+  if (have && Date.now() - have.at < TREE_TTL) return have.value;
+  const r = await githubGet(
+    repo,
+    `/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`
+  );
+  if (r.ok !== true) {
+    return {
+      ok: false,
+      why: r.status === 404 ? `GitHub has no branch called ${ref} on ${repo}, so there is no tree to search \u2014 that is a missing branch, not a missing file` : r.why
+    };
+  }
+  const entries = Array.isArray(r.body?.tree) ? r.body.tree : [];
+  const value = {
+    ok: true,
+    at: Date.now(),
+    truncated: r.body?.truncated === true,
+    files: entries.filter((e) => e?.type === "blob").map((e) => String(e.path)),
+    dirs: entries.filter((e) => e?.type === "tree").map((e) => String(e.path))
+  };
+  treeCache.set(key, { at: Date.now(), value });
+  return value;
+}
+async function roomRepo() {
+  if (here.repo?.full) return here.repo;
+  if (!here.roomId || !here.client) return null;
+  const { data: ws } = await here.client.from("workspaces").select("gh_full_name, branch, base_branch").eq("room_id", here.roomId).maybeSingle();
+  if (!ws?.gh_full_name) return null;
+  here.repo = { full: ws.gh_full_name, branch: ws.branch ?? ws.base_branch ?? null };
+  return here.repo;
 }
 var SELF_REVIEW = `
 
@@ -40134,7 +40819,7 @@ async function autoStep(task, mineToReview = 0) {
       p_on: false,
       p_why: why
     });
-    if (error3) debug(`set_auto off: ${error3.message}`);
+    if (error3) debug2(`set_auto off: ${error3.message}`);
     return { systemMessage: `Floor \u2014 auto mode is off: ${why}.` };
   };
   if (here.autoFailed) return halt2(here.autoFailed);
@@ -40162,7 +40847,7 @@ async function autoStep(task, mineToReview = 0) {
     { p_room: here.roomId, p_agent: here.agentId }
   );
   if (error2) {
-    debug(`auto next_task: ${error2.message}`);
+    debug2(`auto next_task: ${error2.message}`);
     return null;
   }
   const d = data ?? {};
@@ -40200,7 +40885,7 @@ async function taskOffer(payload) {
   if (here.paused || here.stopped) return null;
   if (!here.roomId || !here.agentId || !here.client) return null;
   const { data, error: error2 } = await here.client.rpc("peek_task", { p_room: here.roomId, p_agent: here.agentId });
-  if (error2) debug(`peek: ${error2.message}`);
+  if (error2) debug2(`peek: ${error2.message}`);
   if (!error2) {
     here.redirect = data?.redirect?.id ? data.redirect : null;
     here.split = data?.split?.taskId ? data.split : null;
@@ -40315,7 +41000,7 @@ async function ingest(line, conn) {
   try {
     payload = JSON.parse(line);
   } catch {
-    debug("unparseable line");
+    debug2("unparseable line");
     return;
   }
   if (payload?.floor === "git-credential") {
@@ -40331,7 +41016,7 @@ async function ingest(line, conn) {
           "floor: another Claude Code session is sharing this machine's Floor socket.\nfloor: its work is not being reported, rather than being reported as this agent's.\n"
         );
       }
-      debug(`ignoring payload from session ${String(sid).slice(0, 8)}`);
+      debug2(`ignoring payload from session ${String(sid).slice(0, 8)}`);
       return;
     }
   }
@@ -40430,8 +41115,8 @@ async function ingest(line, conn) {
   }
   if (!ready || !here.roomId) {
     if (waiting.length < WAITING_MAX) waiting.push(payload);
-    else debug("queue full, dropping");
-    debug(`queued ${payload.hook_event_name} (${waiting.length} waiting)`);
+    else debug2("queue full, dropping");
+    debug2(`queued ${payload.hook_event_name} (${waiting.length} waiting)`);
     return;
   }
   await send(payload);
@@ -40584,18 +41269,47 @@ ${FENCE}
     here.repoRoot ?? here.cwd
   );
   const paths2 = intent.paths;
+  const tool = String(payload.tool_name ?? "");
+  const ours = tool.includes("floor_") || tool === "ToolSearch" || tool === "AskUserQuestion";
   if (here.stopped) {
-    const tool = String(payload.tool_name ?? "");
-    const ours = tool.includes("floor_") || tool === "ToolSearch" || tool === "AskUserQuestion";
     if (!ours && (paths2.length || intent.unknown)) return halt(here.stopped);
     return allow(
       `${here.stopped} Nothing you write will be coordinated with that room until this terminal is in one again \u2014 /floor:join with an invite code, or /floor status to see where it thinks it is.`
     );
   }
+  if (here.repoRoot && !ours) {
+    const command = String(payload.tool_input?.command ?? "");
+    if (!here.coneFull && needsWholeTree(command)) {
+      const naming = command.trim().split(/\s+/).slice(0, 3).join(" ");
+      const done = await within(widenBudget(), widenWholeTree(naming || "this command"));
+      if (!done) {
+        here.notices.push(
+          `\`${naming}\` reads files it does not name and this is a partial checkout, so Floor is checking the rest of the repository out now. That is still running. If this fails on a file that is not there, it is the checkout catching up and not the repository \u2014 run it again.`
+        );
+      }
+    } else {
+      const refs = referencedPaths(
+        payload.tool_name,
+        payload.tool_input,
+        here.cwd,
+        here.repoRoot ?? here.cwd
+      );
+      const want = outsideCone(refs);
+      if (want.length) {
+        const reads = want.filter((p) => !paths2.includes(p));
+        const done = await within(widenBudget(), widenSoon(want, reads));
+        if (!done) {
+          here.notices.push(
+            `Floor is still fetching ${want.join(", ")} into this sparse checkout \u2014 they were not on this disk when you asked for them. If this call comes back with nothing found or no such file, that is the fetch not having finished, NOT the repository lacking the file. Run it again.`
+          );
+        }
+      }
+    }
+  }
   if (intent.unknown && !paths2.length) {
     if (!ready || !here.roomId) return allow();
     const why = intent.why.slice(0, 2).join("; ");
-    if (process.env.FLOOR_STRICT_WRITES) {
+    if (process.env.FLOOR_STRICT_WRITES && !ours) {
       return {
         ...unpaused ? { systemMessage: `Floor \u2014 ${unpaused}` } : {},
         hookSpecificOutput: {
@@ -40620,18 +41334,18 @@ ${FENCE}
     p_paths: paths2
   });
   if (error2) {
-    debug(`claim check failed, allowing: ${error2.message}`);
+    debug2(`claim check failed, allowing: ${error2.message}`);
     return allow();
   }
   if (data?.ok !== false) {
-    if (data?.claimed?.length) debug(`claimed ${data.claimed.join(", ")}`);
+    if (data?.claimed?.length) debug2(`claimed ${data.claimed.join(", ")}`);
     const stale = stalePaths(here.reads, here.contested, paths2);
     if (stale.length) {
       const mins = (at) => Math.max(1, Math.round((Date.now() - at) / 6e4));
       const lines = stale.map(
         (x) => `  ${x.path} \u2014 @${x.agent} wrote it ${mins(x.at)}m ago, after you read it`
       );
-      debug(`stale: ${stale.map((x) => x.path).join(", ")}`);
+      debug2(`stale: ${stale.map((x) => x.path).join(", ")}`);
       return allow(
         `You are about to write files that somebody else in this room has changed since you last read them:
 ${lines.join("\n")}
@@ -40642,13 +41356,13 @@ Their change is not in this checkout yet \u2014 everyone here works in their own
     return allow();
   }
   if (data.reason !== "HELD") {
-    debug(`claim check refused for another reason, allowing: ${data.reason}`);
+    debug2(`claim check refused for another reason, allowing: ${data.reason}`);
     return allow();
   }
   const held = data.held ?? [];
   const one = held[0] ?? {};
   const rest = held.length > 1 ? ` (and ${held.length - 1} more)` : "";
-  debug(`denied: ${one.path} held by @${one.holder}`);
+  debug2(`denied: ${one.path} held by @${one.holder}`);
   return {
     ...unpaused ? { systemMessage: `Floor \u2014 ${unpaused}` } : {},
     hookSpecificOutput: {
@@ -40664,11 +41378,11 @@ function markActivity(state) {
   void here.client.rpc("set_agent_activity", { p_agent: here.agentId, p_state: state }).then(({ data, error: error2 }) => {
     if (error2 || data?.ok === false) {
       here.activity = null;
-      debug(`could not report ${state}: ${error2?.message ?? data?.reason}`);
+      debug2(`could not report ${state}: ${error2?.message ?? data?.reason}`);
     }
   }, (e) => {
     here.activity = null;
-    debug(`activity: ${e?.message ?? e}`);
+    debug2(`activity: ${e?.message ?? e}`);
   });
 }
 async function send(payload) {
@@ -40680,7 +41394,7 @@ async function send(payload) {
   }
   if (mapped?.kind === "tool_result") here.lastDoing = null;
   if (!mapped) {
-    debug(`ignored ${payload.hook_event_name}`);
+    debug2(`ignored ${payload.hook_event_name}`);
     return;
   }
   if (mapped.actor === "agent") {
@@ -40697,7 +41411,7 @@ async function send(payload) {
         `floor: could not mirror ${mapped.kind}: ${error2?.message ?? data?.reason}
 `
       );
-    } else debug(`mirrored ${mapped.kind}`);
+    } else debug2(`mirrored ${mapped.kind}`);
   } else if (mapped.terminal) {
     const agentId = await ensureAgent();
     if (!agentId) return;
@@ -40711,7 +41425,7 @@ async function send(payload) {
         `floor: could not mirror your prompt: ${error2?.message ?? data?.reason}
 `
       );
-    } else debug("mirrored prompt");
+    } else debug2("mirrored prompt");
   } else {
     const { error: error2 } = await here.client.rpc("append_event", {
       p_room: here.roomId,
@@ -40722,7 +41436,7 @@ async function send(payload) {
     });
     if (error2) process.stderr.write(`floor: could not mirror ${mapped.kind}: ${error2.message}
 `);
-    else debug(`mirrored ${mapped.kind}`);
+    else debug2(`mirrored ${mapped.kind}`);
   }
   if (mapped.touchedFiles) scheduleWorkspace();
 }
@@ -40763,6 +41477,39 @@ var TOOLS = [
     description: "Which Floor room this terminal is in, and who else is here.",
     inputSchema: { type: "object", properties: {} }
   },
+  /**
+   * The other half of "a sparse checkout must never lie to the agent in it".
+   *
+   * Widening handles paths somebody named. This handles the question that
+   * names no path — "is there anything in here that does X" — which `grep -r`
+   * answers about THIS DISK while the agent reads the answer as being about
+   * the repository. In a partial checkout those are different facts.
+   *
+   * The description is written to be read cold, by a model that has no idea
+   * its checkout is partial, at the moment it is about to conclude something
+   * does not exist. So it leads with the failure it prevents rather than with
+   * what the tool does.
+   */
+  {
+    name: "floor_find",
+    description: "Search the WHOLE repository, over GitHub, rather than the files that happen to be on this disk. This terminal's checkout may be partial: Floor checks out a sparse cone, so a file the repository has can be absent from disk, and grep, ls, find and cat cannot tell that apart from a file that does not exist. Call this BEFORE concluding that something is missing, and before writing a second copy of anything. It answers with the repository's own tree on the room's branch, and it says so plainly when it could not ask \u2014 which is not the same as finding nothing. Opening a path it reports brings that file into this checkout automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "For kind 'path': part of a file path, or a glob like '*/auth/*.ts'. For kind 'text': what to look for inside files."
+        },
+        kind: {
+          type: "string",
+          enum: ["path", "text"],
+          description: "'path' (the default) matches file and directory names against the repository's full tree \u2014 complete, and current with what teammates have pushed. 'text' searches file CONTENTS through GitHub code search, which only indexes the default branch and lags behind a push by minutes."
+        },
+        limit: { type: "number", description: "How many hits to show. Default 40." }
+      },
+      required: ["query"]
+    }
+  },
   {
     name: "floor_approve",
     description: "Answer a direction somebody in the room sent to this terminal. Only call it after asking the person here and getting their answer \u2014 the whole point is that somebody else's words do not run on this machine without them. Held directions are announced with their seq.",
@@ -40793,7 +41540,14 @@ var TOOLS = [
   },
   {
     name: "floor_leave",
-    description: "Leave the room this terminal is in. Nothing is deleted.",
+    /**
+     * "Nothing is deleted" was true until joining a room started putting a
+     * repository on somebody's disk, and a sentence that stops matching its
+     * mechanism is the dead-button failure wearing a different face. What is
+     * deleted is precisely the checkout Floor made and nothing else — and only
+     * when everything in it is committed and pushed.
+     */
+    description: "Leave the room this terminal is in. The work stays in the room's history and nothing of yours is deleted: if Floor cloned this room's repository into ~/Floor for you, that checkout is removed too, but only when it has no uncommitted and no unpushed work in it. A checkout you made yourself is never touched.",
     inputSchema: { type: "object", properties: {} }
   },
   /**
@@ -41058,7 +41812,7 @@ async function watchFeed(roomId) {
   await new Promise((resolve) => {
     ch.subscribe((status) => {
       if (["SUBSCRIBED", "CHANNEL_ERROR", "TIMED_OUT"].includes(status)) resolve();
-      if (status === "SUBSCRIBED") debug("watching the room for controls");
+      if (status === "SUBSCRIBED") debug2("watching the room for controls");
     });
   });
   here.feed = ch;
@@ -41067,7 +41821,7 @@ async function controlIsReal(kind) {
   if (!here.client || !here.agentId) return false;
   const { data, error: error2 } = await here.client.from("agents").select("control, paused, state, dismissed_at, releasing_since, redirect_to, split_for, split_task").eq("id", here.agentId).maybeSingle();
   if (error2 || !data) {
-    debug(`control ${kind}: could not verify (${error2?.message ?? "no row"}), ignoring`);
+    debug2(`control ${kind}: could not verify (${error2?.message ?? "no row"}), ignoring`);
     return false;
   }
   switch (kind) {
@@ -41112,7 +41866,7 @@ async function loadRepoNotes() {
   if (!here.client || !here.roomId) return;
   const { data, error: error2 } = await here.client.rpc("repo_notes", { p_room: here.roomId });
   if (error2) {
-    debug(`repo notes: ${error2.message}`);
+    debug2(`repo notes: ${error2.message}`);
     return;
   }
   const notes = Array.isArray(data?.notes) ? data.notes : [];
@@ -41139,7 +41893,7 @@ ${lines.join("\n")}` + (dropped ? `
 
 If you hit something here that is not written down, floor_remember puts it on this list for everyone after you.`
   );
-  debug(`repo notes: ${lines.length} injected, ${dropped} dropped`);
+  debug2(`repo notes: ${lines.length} injected, ${dropped} dropped`);
 }
 var SAW_FILE = /* @__PURE__ */ new Set(["Read", "Edit", "Write", "NotebookEdit", "MultiEdit"]);
 function noteWhatWeSaw(payload) {
@@ -41207,11 +41961,11 @@ async function onRoomEvent(row) {
   noteSomebodyElsesWrite(row);
   const c = toControl(row, here.agentId, here.userId);
   if (!c) return;
-  debug(`control: ${c.kind}`);
+  debug2(`control: ${c.kind}`);
   if (c.kind === "seat_lost" || c.kind === "seat_dropped") {
     const { data: still } = await here.client.from("room_seats").select("user_id").eq("room_id", here.roomId).eq("user_id", here.userId).maybeSingle();
     if (still) {
-      debug(`${c.kind}: the seat is still held, ignoring`);
+      debug2(`${c.kind}: the seat is still held, ignoring`);
       return;
     }
     here.seat = false;
@@ -41226,7 +41980,7 @@ async function onRoomEvent(row) {
 `);
     } else {
       here.seatLost = "idle";
-      debug(`${c.kind}: seat lapsed, taking it back on the next hook`);
+      debug2(`${c.kind}: seat lapsed, taking it back on the next hook`);
     }
     return;
   }
@@ -41238,7 +41992,7 @@ async function onRoomEvent(row) {
   }
   if (!here.agentId) return;
   if (VERIFIED.has(c.kind) && !await controlIsReal(c.kind)) {
-    debug(`control ${c.kind}: the agents row does not agree, ignoring`);
+    debug2(`control ${c.kind}: the agents row does not agree, ignoring`);
     return;
   }
   if (c.kind === "stop" || c.kind === "release") {
@@ -41284,7 +42038,7 @@ async function onRoomEvent(row) {
     here.paused = true;
     here.pauseSaid = false;
     const killed = await killRunningTools(process.ppid);
-    debug(`pause: interrupted ${killed.length} running process(es)`);
+    debug2(`pause: interrupted ${killed.length} running process(es)`);
     return;
   }
   if (c.kind === "resume") {
@@ -41309,13 +42063,13 @@ async function onRoomEvent(row) {
     releaseHolds("stopped");
     const parent = process.ppid;
     const killed = await killRunningTools(parent);
-    debug(`hard stop: interrupted ${killed.length} running process(es)`);
+    debug2(`hard stop: interrupted ${killed.length} running process(es)`);
     return;
   }
   if (c.kind === "direction" && c.text) {
     if (c.needsApproval) {
       here.awaitingApproval.set(c.seq, c.text);
-      debug(`direction ${c.seq} waiting for approval`);
+      debug2(`direction ${c.seq} waiting for approval`);
       here.notices.push(
         `Someone in this Floor room has sent a direction to this terminal. It is HELD and will not run unless the person here approves it.
 
@@ -41336,7 +42090,7 @@ ${FENCE}
       );
     } else {
       here.pendingDirections.push(c.text);
-      debug(`direction ${c.seq} is the owner's own (${here.pendingDirections.length} waiting)`);
+      debug2(`direction ${c.seq} is the owner's own (${here.pendingDirections.length} waiting)`);
     }
     return;
   }
@@ -41344,16 +42098,16 @@ ${FENCE}
     const text = here.awaitingApproval.get(c.seq);
     here.awaitingApproval.delete(c.seq);
     if (!text) {
-      debug(`approval for unknown direction ${c.seq}, ignored`);
+      debug2(`approval for unknown direction ${c.seq}, ignored`);
       return;
     }
     here.pendingDirections.push(text);
-    debug(`direction ${c.seq} approved (${here.pendingDirections.length} waiting)`);
+    debug2(`direction ${c.seq} approved (${here.pendingDirections.length} waiting)`);
     return;
   }
   if (c.kind === "direction_rejected") {
     here.awaitingApproval.delete(c.seq);
-    debug(`direction ${c.seq} rejected`);
+    debug2(`direction ${c.seq} rejected`);
   }
 }
 var APPROVAL_EVERY = 4e3;
@@ -41371,7 +42125,7 @@ function watchForApproval(code) {
     }
     if (Date.now() > until) {
       watchingCode = null;
-      debug("gave up waiting for approval");
+      debug2("gave up waiting for approval");
       return;
     }
     try {
@@ -41387,7 +42141,7 @@ function watchForApproval(code) {
           here.notices.push(
             `You were let into the Floor room "${room.title}" while you were working. This terminal is now present in it, and what happens here shows up for everyone else in the room as it happens.` + (url ? ` The room is at ${url}.` : "") + repoLine + ` Mention this to the person once, then carry on.`
           );
-          debug(`walked in to ${room.id} on approval`);
+          debug2(`walked in to ${room.id} on approval`);
           return;
         }
       }
@@ -41400,7 +42154,7 @@ function watchForApproval(code) {
         return;
       }
     } catch (e) {
-      debug(`approval poll: ${e?.message ?? e}`);
+      debug2(`approval poll: ${e?.message ?? e}`);
     }
     setTimeout(tick, APPROVAL_EVERY).unref?.();
   };
@@ -41418,7 +42172,7 @@ async function resume() {
     if (saved) {
       here.roomTitle = saved.title ?? null;
       await hold(saved.roomId);
-      debug(`resumed into ${saved.roomId}`);
+      debug2(`resumed into ${saved.roomId}`);
       await ensureAgent();
       await drain();
       return;
@@ -41559,7 +42313,7 @@ This machine is not a member yet. Ask the person what display name they want eve
     try {
       wired = await configureCheckout(here.repoRoot ?? here.cwd);
     } catch (e) {
-      debug(`configureCheckout: ${e?.message ?? e}`);
+      debug2(`configureCheckout: ${e?.message ?? e}`);
     }
     const access = wired ? ` git here now authenticates through your membership of this room, so fetching and pushing ${ws.gh_full_name} needs nothing set up on GitHub.` : "";
     const want = ws.branch ?? ws.base_branch;
@@ -41652,6 +42406,104 @@ This machine is not a member yet. Ask the person what display name they want eve
     return say(
       `In "${here.roomTitle ?? here.roomId}" as ${here.name ?? "someone"}.
 Present: ${people.length ? people.join(", ") : "just this terminal"}` + seatLine + webLine()
+    );
+  }
+  if (name === "floor_find") {
+    if (!here.roomId) {
+      const saved = rememberedRoom();
+      if (saved) {
+        here.roomTitle = saved.title ?? null;
+        await hold(saved.roomId);
+      }
+    }
+    const query = String(args.query ?? "").trim();
+    if (!query) return say("floor_find needs something to look for.");
+    const limit = Math.max(1, Math.min(200, Number(args.limit) || 40));
+    const kind = args.kind === "text" ? "text" : "path";
+    const repo = await roomRepo();
+    if (!repo?.full) {
+      return say(
+        here.roomId ? `This room has no repository linked, so there is no repository to search. Whatever is on this disk is all there is.` : `This terminal is not in a Floor room, so Floor does not know which repository to search. /floor:join <code>`
+      );
+    }
+    const ref = repo.branch ?? "HEAD";
+    const asOf = `${repo.full} on ${ref}`;
+    const onDisk = (p) => here.repoRoot && existsSync3(joinPath(here.repoRoot, p));
+    const mark = (p) => `  ${p}${onDisk(p) ? "" : "   [in the repository, not yet on this disk]"}`;
+    if (kind === "text") {
+      const q = encodeURIComponent(`${query} repo:${repo.full}`);
+      const r = await githubGet(repo.full, `/search/code?q=${q}&per_page=${limit}`);
+      if (r.ok !== true) {
+        return say(
+          `Floor could not search the contents of ${repo.full}. ${r.why}.
+
+THIS IS NOT A RESULT. It says nothing about whether "${query}" is in the repository. Do not treat it as evidence of absence, and do not write a second copy of anything on the strength of it. Try floor_find with kind "path", which reads the tree instead of the search index and works on any branch.`
+        );
+      }
+      const items = Array.isArray(r.body?.items) ? r.body.items : [];
+      const seen = [];
+      for (const it of items) {
+        const p = String(it?.path ?? "");
+        if (p && !seen.includes(p)) seen.push(p);
+      }
+      if (!seen.length) {
+        return say(
+          `GitHub code search found no "${query}" in ${repo.full}.
+
+Read that carefully before acting on it: code search indexes the DEFAULT branch only and lags a push by minutes, so this is weaker than a tree lookup. If you are looking for a file rather than a phrase, ask again with kind "path" \u2014 that reads ${asOf} directly and is complete.`
+        );
+      }
+      return say(
+        `${seen.length} file${seen.length > 1 ? "s" : ""} in ${repo.full} contain "${query}" (GitHub code search, default branch, indexed a few minutes behind):
+${seen.slice(0, limit).map(mark).join("\n")}
+
+Anything marked as not on this disk is outside this sparse checkout. Reading it works anyway \u2014 Floor brings a file in when a tool call names it.`
+      );
+    }
+    const tree = await repoTree(repo.full, ref);
+    if (tree.ok !== true) {
+      return say(
+        `Floor could not read the file tree of ${asOf}. ${tree.why}.
+
+THIS IS NOT A RESULT. Nothing here says whether "${query}" exists. This checkout may be sparse, so \`ls\`, \`find\` and \`grep -r\` cannot settle it either \u2014 a file the repository has looks exactly like one it does not. Say you could not check rather than assuming it is absent.`
+      );
+    }
+    const glob = /[*?]/.test(query);
+    const rx = glob ? new RegExp(
+      "^" + query.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+      "i"
+    ) : null;
+    const needle = query.toLowerCase();
+    const base = (p) => p.slice(p.lastIndexOf("/") + 1);
+    const hit = (p) => rx ? rx.test(p) || rx.test(base(p)) : p.toLowerCase().includes(needle);
+    const files = tree.files.filter(hit);
+    const dirs = tree.dirs.filter(hit);
+    files.sort((a, b) => {
+      const an = hit(base(a)) ? 0 : 1;
+      const bn = hit(base(b)) ? 0 : 1;
+      return an - bn || a.length - b.length || a.localeCompare(b);
+    });
+    const cut = tree.truncated ? `
+
+GitHub TRUNCATED this tree \u2014 the repository is too big to return in one piece \u2014 so an absence here is not conclusive. Narrow the query, or use kind "text".` : "";
+    if (!files.length && !dirs.length) {
+      const age = Math.round((Date.now() - (tree.at ?? Date.now())) / 1e3);
+      const when = age > 2 ? ` Floor read that tree ${age} seconds ago and has not asked again since, so anything pushed in the last ${age} seconds is not in it.` : "";
+      return say(
+        `Nothing in ${asOf} matches "${query}".
+
+` + (tree.truncated ? `This came from the repository's own file tree rather than from this disk, which makes it better evidence than an empty grep here \u2014 but it is not conclusive.${cut}${when}` : `This came from the repository's own file tree rather than from this disk, so it is safe to act on: the repository genuinely has no path matching that, and this is not the sparse checkout hiding one.${when}`)
+      );
+    }
+    const shown = [...dirs.slice(0, 10).map((d) => `${d}/`), ...files].slice(0, limit);
+    const more = files.length + dirs.length - shown.length;
+    const one = files.length + dirs.length === 1;
+    return say(
+      `${files.length} file${files.length === 1 ? "" : "s"}${dirs.length ? ` and ${dirs.length} director${dirs.length === 1 ? "y" : "ies"}` : ""} in ${asOf} ${one ? "matches" : "match"} "${query}":
+${shown.map(mark).join("\n")}${more > 0 ? `
+  \u2026 ${more} more` : ""}
+
+This is the repository's own tree, not a list of what is on this disk. Anything marked as not on this disk is outside this sparse checkout; reading or editing it works anyway, because Floor brings a file in when a tool call names it.${cut}`
     );
   }
   if (name === "floor_link") {
@@ -41778,6 +42630,7 @@ It connects a GitHub account to this terminal and lands you in ${where}. Nothing
       }
     }
     if (!here.roomId) return say("This terminal is not in a room.");
+    const checkout = await floorMadeCheckout();
     const was = here.roomTitle ?? here.roomId;
     const { data, error: error2 } = await db.rpc("leave_room", { p_room: here.roomId, p_why: null });
     if (error2) return say(`Floor could not leave that room: ${error2.message}`);
@@ -41791,8 +42644,9 @@ It connects a GitHub account to this terminal and lands you in ${where}. Nothing
     here.stopped = null;
     here.stoppedKind = null;
     const stopped = Number(r.agentsStopped ?? 0);
+    const disk = await removeCheckout(checkout);
     return say(
-      `Left "${was}". Your seat is back and the website no longer lists you there.` + (stopped ? ` ${stopped} agent${stopped > 1 ? "s" : ""} of yours stopped.` : "") + ` The work stays in the room's history.`
+      `Left "${was}". Your seat is back and the website no longer lists you there.` + (stopped ? ` ${stopped} agent${stopped > 1 ? "s" : ""} of yours stopped.` : "") + ` The work stays in the room's history.` + disk
     );
   }
   const needAgent = async () => {
@@ -42184,12 +43038,12 @@ async function goodbye() {
       p_last: here.lastSaid,
       p_doing: here.lastDoing
     });
-    debug(error2 || data?.ok === false ? `could not sleep: ${error2?.message ?? data?.reason}` : `asleep, ${data?.claimsDropped ?? 0} claims dropped`);
+    debug2(error2 || data?.ok === false ? `could not sleep: ${error2?.message ?? data?.reason}` : `asleep, ${data?.claimsDropped ?? 0} claims dropped`);
   };
   const dropSeat = async () => {
     if (!here.seat || !here.roomId) return;
     const { error: error2 } = await here.client.rpc("release_seat", { p_room: here.roomId });
-    debug(error2 ? `could not release the seat: ${error2.message}` : "seat released");
+    debug2(error2 ? `could not release the seat: ${error2.message}` : "seat released");
   };
   const work = (async () => {
     await Promise.all([sleepAgent(), dropSeat()]);
