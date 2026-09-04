@@ -42817,8 +42817,11 @@ It connects a GitHub account to this terminal and lands you in ${where}. Nothing
 ` + taskBriefing(d.task) + await handoverBriefing(d.task, here.repoRoot ?? here.cwd) + closeOutLine(d.task)
       );
     }
+    here.notices.push(
+      `Floor \u2014 you agreed to go and help, and "${here.task.title}" is still open on this terminal. Handing it over is the next step: stop where you are, do not begin anything new, and call floor_task_handoff. Unfinished is expected \u2014 the handover is what carries the unfinished part to whoever picks it up.`
+    );
     return say(
-      `Agreed. Floor will ask you to hand over "${here.task.title}" at the end of this turn, and then put you on "${to.title}". Carry on for now \u2014 do not switch here, and do not commit anything.`
+      `Agreed. Stop here \u2014 do not start anything new and do not open another file. Finish only the edit you are already inside, so nothing is left broken, then call floor_task_handoff for "${here.task.title}" right away: what you did, what state the tree is in, what is left, and what you were about to do next. It does NOT need to be finished \u2014 handing over half-done work is the entire point. Floor puts you on "${to.title}" once it lands. Do not switch here, and do not commit anything.`
     );
   }
   if (name === "floor_help_ok") {
@@ -42880,8 +42883,13 @@ It connects a GitHub account to this terminal and lands you in ${where}. Nothing
       );
     }
     here.help = { ...to, needsOk: false, agreed: true };
+    if (here.task) {
+      here.notices.push(
+        `Floor \u2014 you agreed to help with "${to.title}", and "${here.task.title}" is still open on this terminal. Handing it over is the next step: stop where you are, do not begin anything new, and call floor_task_handoff. Unfinished is expected \u2014 the handover is what carries the unfinished part to whoever picks it up.`
+      );
+    }
     return say(
-      here.task ? `Agreed. Floor will ask you to hand over "${here.task.title}" at the end of this turn, and then you wait for a piece of "${to.title}" to be split off for you. Carry on for now \u2014 do not switch here, and do not commit anything.` : `Agreed. You will wait for a piece of "${to.title}" to be split off for you \u2014 it lands here when the holder is ready.`
+      here.task ? `Agreed. Stop here \u2014 do not start anything new and do not open another file. Finish only the edit you are already inside, so nothing is left broken, then call floor_task_handoff for "${here.task.title}" right away: what you did, what state the tree is in, what is left, and what you were about to do next. It does NOT need to be finished \u2014 handing over half-done work is the entire point, and the holder cannot split a piece off for you until this terminal is free. Then you wait for a piece of "${to.title}". Do not switch here, and do not commit anything.` : `Agreed. You will wait for a piece of "${to.title}" to be split off for you \u2014 it lands here when the holder is ready.`
     );
   }
   if (name === "floor_leave") {
