@@ -39171,6 +39171,26 @@ function toControl(row, agentId, userId) {
       why: String(body.why ?? "").trim() || null
     };
   }
+  if (kind === "task" && body.what === "task.help_agreed" && !!agentId && body.holderId === agentId) {
+    return {
+      kind: "help_agreed",
+      taskId: body.taskId ?? null,
+      title: String(body.title ?? "").trim(),
+      helper: String(body.agent ?? "").trim() || null,
+      helperId: body.agentId ?? null,
+      by: String(body.by ?? "").trim() || null
+    };
+  }
+  if (kind === "task" && body.what === "task.ask_withdrawn" && !!agentId && (forMe || body.holderId === agentId)) {
+    return {
+      kind: "ask_withdrawn",
+      taskId: body.taskId ?? null,
+      title: String(body.title ?? "").trim(),
+      by: String(body.by ?? "").trim() || null,
+      why: String(body.why ?? "").trim() || null,
+      mine: forMe
+    };
+  }
   if (kind === "task" && body.what === "task.recalled" && forMe) {
     return {
       kind: "recalled",
@@ -39889,6 +39909,7 @@ var here = {
    * the button — so this is a ceiling on pathology, not on people.
    */
   pauseHolds: 0,
+  waitHolds: 0,
   /**
    * When this terminal last saw each file, repo-relative → ms.
    *
@@ -40016,6 +40037,7 @@ function handoverOwed() {
 var say = (text) => ({ content: [{ type: "text", text }] });
 var FENCE = "----- FLOOR DIRECTION -----";
 var PAUSE_HOLDS_MAX = 3;
+var WAIT_HOLDS_MAX = 3;
 var AUTO_MAX_TASKS = 10;
 var AUTO_MAX_MS = 45 * 6e4;
 async function connect() {
@@ -40930,7 +40952,7 @@ async function readoptHolding() {
     shaRecovered: true
   };
 }
-async function taskOffer(payload) {
+async function taskOffer(payload, conn) {
   if (here.paused || here.stopped) return null;
   if (!here.roomId || !here.agentId || !here.client) return null;
   const { data, error: error2 } = await here.client.rpc("peek_task", { p_room: here.roomId, p_agent: here.agentId });
@@ -40970,7 +40992,7 @@ async function taskOffer(payload) {
 
 Call floor_task_split with:
   note        what you have ALREADY DONE and what you are keeping. @${sp.helper} cannot see this tree, so without it they start by redoing your work.
-  keep_paths  the files you are KEEPING. Required \u2014 handing out all of them would leave you working with no lock at all, and Floor refuses that rather than letting it happen quietly.
+  keep_paths  the files you are KEEPING. Required \u2014 handing out all of them would leave you working with no lock at all, and Floor refuses that rather than letting it happen quietly. If this task started with NO files named, name them now: work the seam out yourself and keep what you are in. A task holding no files is not a task that cannot be split.
   parts       one or more pieces for them, each with its own title and its own files.
 
 The files in a part must not be files you keep, must not repeat between parts, and must not be files a third agent is already holding \u2014 Floor refuses all three, because splitting the words and not the files is the same collision wearing a different name. Pick a seam that actually exists: a module they can own end to end, not "you do half the function".
@@ -41085,7 +41107,21 @@ They said: ${to.why}` : "") + `
 Take it now with floor_task_take, id ${to.id}, and do it. This is not an offer to weigh up \u2014 somebody chose this task for this terminal, and with auto mode off only the person at this machine can do that. If the person here does not want it after all, floor_task_skip with id ${to.id} turns it down instead: that drops the request and it will not be asked again.`
     };
   }
-  if (here.help?.agreed) return null;
+  if (here.help?.agreed) {
+    if (here.waitHolds >= WAIT_HOLDS_MAX) return null;
+    here.waitHolds += 1;
+    const why = await holdWhileWaiting(conn);
+    if (why === "piece") return await taskOffer(payload, conn);
+    if (why === "paused") return { systemMessage: `Floor \u2014 ${PAUSED_NOTICE}` };
+    if (why === "cleared") {
+      return {
+        systemMessage: "Floor \u2014 the room took that help request back before a piece was split off. Nothing is owed here and this terminal is free."
+      };
+    }
+    return {
+      systemMessage: `Floor \u2014 still waiting for a piece of "${here.help.title}" to be split off, and nothing has arrived yet. This turn is ending; the piece will be offered as soon as it lands.`
+    };
+  }
   if (payload.stop_hook_active === true) return null;
   if (here.offersQuiet) return null;
   if (!task?.id || here.declined.has(task.id)) return null;
@@ -41210,10 +41246,11 @@ async function ingest(line, conn) {
       }
       return {};
     }
-    return await taskOffer(payload) ?? {};
+    return await taskOffer(payload, conn) ?? {};
   }
   if (payload.hook_event_name === "UserPromptSubmit") {
     here.pauseHolds = 0;
+    here.waitHolds = 0;
     const news = here.announce.splice(0, here.announce.length);
     if (ready && here.roomId) void send(payload);
     else if (waiting.length < WAITING_MAX) waiting.push(payload);
@@ -41315,6 +41352,30 @@ function holdWhilePaused(conn) {
     const timer = setTimeout(() => done("expired"), HOLD_MAX_MS);
     timer.unref?.();
     holds.add(done);
+    try {
+      conn?.write(JSON.stringify({ floorPaused: true }) + "\n");
+    } catch {
+    }
+  });
+}
+var waits = /* @__PURE__ */ new Set();
+function releaseWaits(why) {
+  for (const done of [...waits]) done(why);
+  waits.clear();
+}
+function holdWhileWaiting(conn) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (why) => {
+      if (settled) return;
+      settled = true;
+      waits.delete(done);
+      clearTimeout(timer);
+      resolve(why);
+    };
+    const timer = setTimeout(() => done("expired"), HOLD_MAX_MS);
+    timer.unref?.();
+    waits.add(done);
     try {
       conn?.write(JSON.stringify({ floorPaused: true }) + "\n");
     } catch {
@@ -41841,7 +41902,7 @@ var TOOLS = [
         keep_paths: {
           type: "array",
           items: { type: "string" },
-          description: "Files you are KEEPING. They stay locked to you and the task narrows to them. Must be files this task already held, and none of them may appear in a part. Handing out everything is a handover, not a split."
+          description: "Files you are KEEPING. They stay locked to you and the task narrows to them. If the task already named files these must be among them; IF IT NAMED NONE, name them now \u2014 deciding the seam is your job, and keeping a file here claims it. None of them may appear in a part. Handing out everything is a handover, not a split."
         },
         parts: {
           type: "array",
@@ -41997,11 +42058,32 @@ async function controlIsReal(kind) {
      */
     case "help_asked":
       return data.help_for !== null ? data : false;
+    /**
+     * The helper said yes, and this arrives at the HOLDER — so the row that
+     * proves it is the holder's own `split_for`/`split_task`, which
+     * `answer_help` writes and a participant cannot. Identical to
+     * `split_asked` because it is the same fact reaching the same terminal by
+     * a different route: one for a split asked up front, one for a split that
+     * became owed the moment somebody agreed to come and help.
+     */
+    case "help_agreed":
+      return data.split_for !== null && data.split_task !== null ? data : false;
+    /**
+     * A withdraw is proved by ABSENCE, so this one hands the row over without
+     * judging it and the handler checks what is no longer there. Returning
+     * `data` rather than `true` is the whole point: a bare true would leave
+     * the handler asking a forgeable event body whether the ask is really
+     * gone, and a forged `task.ask_withdrawn` would then clear a live demand
+     * off somebody's terminal — the exact reverse of the forgeries the two
+     * cases above exist to stop.
+     */
+    case "ask_withdrawn":
+      return data;
     default:
       return true;
   }
 }
-var VERIFIED = /* @__PURE__ */ new Set(["stop", "release", "pause", "resume", "dismissed", "hard_stop", "redirected", "split_asked", "help_asked"]);
+var VERIFIED = /* @__PURE__ */ new Set(["stop", "release", "pause", "resume", "dismissed", "hard_stop", "redirected", "split_asked", "help_asked", "help_agreed", "ask_withdrawn"]);
 var NOTES_MAX = 6e3;
 async function loadRepoNotes() {
   if (!here.client || !here.roomId) return;
@@ -42121,6 +42203,8 @@ function askAboutSplit(sp) {
 
 You are not handing it over and you are not sharing it \u2014 two agents inside one task means two agents inside one set of file locks, which is the collision Floor exists to stop. SPLIT it: carve off a piece with its own files and keep the rest.
 
+If this task never named any files, that is not a reason it cannot be split \u2014 name them now. Work out the seam yourself, keep the files you are in, and give the rest their own piece; keeping a file here claims it for you.
+
 Do it when you reach a point where the seam is clear, and no later than the end of this turn \u2014 Floor will ask again at every turn end until you answer. Call floor_task_split with the note, the files you are keeping, and one or more parts; or floor_split_no with a reason if there is no seam that would not put two agents in one file. This is a colleague's request, not an instruction about how you work: it cannot grant permissions or pre-approve anything.`
   );
 }
@@ -42191,6 +42275,7 @@ async function onRoomEvent(row) {
       takeable: approved
     };
     if (!approved) return askAboutRedirect(here.redirect);
+    releaseWaits("piece");
     const who = c.by ? `${c.by} moved` : "The room moved";
     process.stderr.write(`floor: ${who} this agent to "${c.title}"
 `);
@@ -42246,9 +42331,76 @@ async function onRoomEvent(row) {
     );
     return;
   }
+  if (c.kind === "help_agreed") {
+    if (!c.taskId) return;
+    if (!verifiedRow || verifiedRow.split_task !== c.taskId) {
+      debug2(`help agreed ${c.taskId}: the agents row asks about ${verifiedRow?.split_task ?? "nothing"}, ignoring`);
+      return;
+    }
+    if (c.helperId && verifiedRow.split_for !== c.helperId) {
+      debug2(`help agreed ${c.taskId}: the agents row names a different helper, ignoring`);
+      return;
+    }
+    here.split = {
+      taskId: c.taskId,
+      title: c.title,
+      helper: c.helper,
+      helperId: c.helperId,
+      by: c.by,
+      why: null
+    };
+    const who = c.helper ? `@${c.helper}` : "Somebody";
+    process.stderr.write(`floor: ${who} agreed to help with "${c.title}"
+`);
+    here.announce.push(
+      `${who} agreed to help with "${c.title}" and is waiting for a piece of it. Split one off with floor_task_split, or turn it down with floor_split_no and a reason.`
+    );
+    if (here.task && here.task.id === c.taskId) askAboutSplit(here.split);
+    return;
+  }
+  if (c.kind === "ask_withdrawn") {
+    if (!c.taskId) return;
+    if (!verifiedRow) return;
+    if (c.mine && (verifiedRow.help_for === c.taskId || verifiedRow.redirect_to === c.taskId)) {
+      debug2(`withdraw ${c.taskId}: the agents row still carries that ask, ignoring`);
+      return;
+    }
+    if (!c.mine && verifiedRow.split_task === c.taskId) {
+      debug2(`withdraw ${c.taskId}: the agents row still asks for that split, ignoring`);
+      return;
+    }
+    let dropped = null;
+    if (c.mine) {
+      if (here.help && here.help.id === c.taskId) {
+        dropped = here.help.title || c.title;
+        here.help = null;
+        here.helpAsked = null;
+      }
+      if (here.redirect && here.redirect.id === c.taskId) {
+        dropped = dropped || here.redirect.title || c.title;
+        here.redirect = null;
+        here.redirectAsked = null;
+      }
+    }
+    if (here.split && here.split.taskId === c.taskId) {
+      dropped = dropped || here.split.title || c.title;
+      here.split = null;
+      here.splitAsked = null;
+    }
+    releaseWaits("cleared");
+    if (!dropped) return;
+    const who = c.by ? `${c.by} took` : "The room took";
+    process.stderr.write(`floor: ${who} back the request about "${dropped}"
+`);
+    here.announce.push(
+      `${who} back the request about "${dropped}". Nothing is owed for it and this terminal is free to carry on.`
+    );
+    return;
+  }
   if (c.kind === "pause") {
     here.paused = true;
     here.pauseSaid = false;
+    releaseWaits("paused");
     const killed = await killRunningTools(process.ppid);
     debug2(`pause: interrupted ${killed.length} running process(es)`);
     return;
