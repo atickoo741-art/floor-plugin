@@ -39146,22 +39146,7 @@ function toControl(row, agentId, userId) {
       taskId: body.taskId ?? null,
       title: String(body.title ?? "").trim(),
       by: String(body.by ?? "").trim() || null,
-      why: String(body.why ?? "").trim() || null,
-      /**
-       * Whether the person at THIS terminal still has to say yes.
-       *
-       * Stamped by `redirect_agent` on the immutable event, exactly like a
-       * direction's own `needsApproval` — so it is not something the sender
-       * chose and not something this process decides. False means the sender
-       * owns this agent, or auto mode is on and they already said "take what
-       * the list gives you".
-       *
-       * Read the same fail-closed way: only an explicit false skips the ask.
-       * An event with no stamp at all came from before this existed, and the
-       * last thing to do with "I do not know" is treat it as "go ahead" — that
-       * would move somebody's terminal off its work without asking.
-       */
-      needsOk: body.needsApproval !== false
+      why: String(body.why ?? "").trim() || null
     };
   }
   if (kind === "task" && body.what === "task.split_asked" && forMe) {
@@ -40881,6 +40866,19 @@ Task ${here.autoTaken} of at most ${AUTO_MAX_TASKS} this run: ${d.task.title}
 ` + taskBriefing(d.task) + await handoverBriefing(d.task, here.repoRoot ?? here.cwd) + closeOutLine(d.task) + ` The next one will be handed to you the same way.`
   };
 }
+async function readoptHolding() {
+  if (here.task || !here.roomId || !here.agentId || !here.client) return;
+  const { data, error: error2 } = await here.client.rpc("peek_task", { p_room: here.roomId, p_agent: here.agentId });
+  if (error2 || !data?.holding?.id) return;
+  here.task = {
+    id: data.holding.id,
+    title: data.holding.title,
+    isReview: isReviewTask(data.holding),
+    reviewOf: data.holding.reviewOf ?? null,
+    sha: await headSha(here.repoRoot ?? here.cwd),
+    shaRecovered: true
+  };
+}
 async function taskOffer(payload) {
   if (here.paused || here.stopped) return null;
   if (!here.roomId || !here.agentId || !here.client) return null;
@@ -40891,6 +40889,11 @@ async function taskOffer(payload) {
     here.split = data?.split?.taskId ? data.split : null;
     if (!here.redirect) here.redirectAsked = null;
     if (!here.split) here.splitAsked = null;
+  }
+  if (!error2) {
+    if (here.task && data?.holding?.id !== here.task.id) {
+      here.task = null;
+    }
   }
   if (!here.task && data?.holding?.id) {
     here.task = {
@@ -40923,6 +40926,7 @@ Whichever you choose, you keep what you kept and carry on with it.`
     };
   }
   if (here.task && here.redirect?.takeable && here.redirect.id !== here.task.id) {
+    if (payload.stop_hook_active === true) return null;
     const to = here.redirect;
     return {
       systemMessage: `Floor \u2014 you have been moved to "${to.title}". Hand over "${here.task.title}" first.`,
@@ -40964,6 +40968,7 @@ Then take "${to.title}". If you are genuinely a minute from finishing what you h
   const task = data?.task;
   if (auto) return await autoStep(task, Number(data?.mineToReview ?? 0));
   if (here.redirect?.takeable && !here.task) {
+    if (payload.stop_hook_active === true) return null;
     const to = here.redirect;
     return {
       systemMessage: `Floor \u2014 you have been moved to "${to.title}".`,
@@ -40971,7 +40976,7 @@ Then take "${to.title}". If you are genuinely a minute from finishing what you h
       reason: `${to.by ? `${to.by} has` : "The room has"} moved this terminal to "${to.title}".` + (to.why ? `
 They said: ${to.why}` : "") + `
 
-Take it now with floor_task_take, id ${to.id}, and do it. This is not an offer to weigh up \u2014 somebody chose this task for this terminal, and with auto mode off only the person at this machine can do that.`
+Take it now with floor_task_take, id ${to.id}, and do it. This is not an offer to weigh up \u2014 somebody chose this task for this terminal, and with auto mode off only the person at this machine can do that. If the person here does not want it after all, floor_task_skip with id ${to.id} turns it down instead: that drops the request and it will not be asked again.`
     };
   }
   if (payload.stop_hook_active === true) return null;
@@ -41524,7 +41529,7 @@ var TOOLS = [
   },
   {
     name: "floor_redirect_ok",
-    description: "Answer a request from somebody in the room to move this terminal to a different Floor task. Only call it after asking the person here and getting their answer \u2014 a request from a colleague does not move this machine off its work without them. A no drops the request and this terminal carries on with exactly what it was doing.",
+    description: "Answer a request from somebody in the room to move this terminal to a different Floor task. Only call it after asking the person here and getting their answer \u2014 a request from a colleague does not move this machine off its work without them. A no drops the request and this terminal carries on with exactly what it was doing. Only for a request that still needs an answer: a move that was already agreed is declined with floor_task_skip instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -41616,7 +41621,7 @@ var TOOLS = [
   },
   {
     name: "floor_task_skip",
-    description: "The person here does not want this task. Records the refusal so it is not offered to this terminal again, and puts it back for somebody else.",
+    description: "The person here does not want this task. Records the refusal so it is not offered to this terminal again, and puts it back for somebody else. Skipping the task a redirect points at also drops the redirect itself.",
     inputSchema: {
       type: "object",
       properties: {
@@ -41819,7 +41824,7 @@ async function watchFeed(roomId) {
 }
 async function controlIsReal(kind) {
   if (!here.client || !here.agentId) return false;
-  const { data, error: error2 } = await here.client.from("agents").select("control, paused, state, dismissed_at, releasing_since, redirect_to, split_for, split_task").eq("id", here.agentId).maybeSingle();
+  const { data, error: error2 } = await here.client.from("agents").select("control, paused, state, dismissed_at, releasing_since, redirect_to, redirect_ok, redirect_by, split_for, split_task").eq("id", here.agentId).maybeSingle();
   if (error2 || !data) {
     debug2(`control ${kind}: could not verify (${error2?.message ?? "no row"}), ignoring`);
     return false;
@@ -41842,20 +41847,22 @@ async function controlIsReal(kind) {
      * `redirect_agent` writes the row, and a participant cannot. The event on
      * its own is forgeable — `append_event` puts no constraint on `kind` — and
      * a forged redirect would send somebody else's terminal off its task and
-     * demand a handover of work that was going fine.
+     * demand a handover of work that was going fine. Returns the row so the
+     * handler can check the event names the task the row actually points at,
+     * and read `redirect_ok` off the row rather than any stamp on the event.
      */
     case "redirected":
-      return data.redirect_to !== null;
+      return data.redirect_to !== null ? data : false;
     /**
      * Same reasoning one step along. `redirect_agent` writes `split_for` and
      * `split_task` on the holder's row and a participant cannot, so the row is
      * the record and the event is only a nudge to go and read it. A forged
      * `task.split_asked` would otherwise push somebody else's terminal into
      * carving up work that was going fine, and hand its file locks to an agent
-     * nobody sent.
+     * nobody sent. Returns the row so the handler can match both ids.
      */
     case "split_asked":
-      return data.split_for !== null && data.split_task !== null;
+      return data.split_for !== null && data.split_task !== null ? data : false;
     default:
       return true;
   }
@@ -41991,9 +41998,14 @@ async function onRoomEvent(row) {
     return;
   }
   if (!here.agentId) return;
-  if (VERIFIED.has(c.kind) && !await controlIsReal(c.kind)) {
-    debug2(`control ${c.kind}: the agents row does not agree, ignoring`);
-    return;
+  let verifiedRow = null;
+  if (VERIFIED.has(c.kind)) {
+    const verdict = await controlIsReal(c.kind);
+    if (!verdict) {
+      debug2(`control ${c.kind}: the agents row does not agree, ignoring`);
+      return;
+    }
+    if (typeof verdict === "object") verifiedRow = verdict;
   }
   if (c.kind === "stop" || c.kind === "release") {
     here.stopped = "Someone in the room stopped this agent.";
@@ -42004,15 +42016,20 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "redirected") {
     if (!c.taskId) return;
+    if (!verifiedRow || verifiedRow.redirect_to !== c.taskId) {
+      debug2(`redirect ${c.taskId}: the agents row points at ${verifiedRow?.redirect_to ?? "nothing"}, ignoring`);
+      return;
+    }
+    const approved = verifiedRow.redirect_ok !== false;
     here.redirect = {
       id: c.taskId,
       title: c.title,
       by: c.by,
       why: c.why,
-      needsOk: c.needsOk === true,
-      takeable: c.needsOk !== true
+      needsOk: !approved,
+      takeable: approved
     };
-    if (c.needsOk) return askAboutRedirect(here.redirect);
+    if (!approved) return askAboutRedirect(here.redirect);
     const who = c.by ? `${c.by} moved` : "The room moved";
     process.stderr.write(`floor: ${who} this agent to "${c.title}"
 `);
@@ -42023,6 +42040,14 @@ async function onRoomEvent(row) {
   }
   if (c.kind === "split_asked") {
     if (!c.taskId) return;
+    if (!verifiedRow || verifiedRow.split_task !== c.taskId) {
+      debug2(`split ask ${c.taskId}: the agents row asks about ${verifiedRow?.split_task ?? "nothing"}, ignoring`);
+      return;
+    }
+    if (c.helperId && verifiedRow.split_for !== c.helperId) {
+      debug2(`split ask ${c.taskId}: the agents row names a different helper, ignoring`);
+      return;
+    }
     here.split = {
       taskId: c.taskId,
       title: c.title,
@@ -42590,6 +42615,11 @@ It connects a GitHub account to this terminal and lands you in ${where}. Nothing
     if (!here.roomId) return say("This terminal is not in a room.");
     if (!here.agentId) return say("This terminal has no agent in the room.");
     if (!here.redirect?.needsOk) {
+      if (here.redirect?.takeable) {
+        return say(
+          `That move needs no answer \u2014 it was already agreed, so Floor will put you on "${here.redirect.title}" at the end of this turn. If the person here does not want it after all, floor_task_skip with id ${here.redirect.id} turns it down instead.`
+        );
+      }
       return say("Nothing is waiting on an answer about moving this terminal.");
     }
     const approve = args.approve !== false;
@@ -42725,6 +42755,7 @@ ${open2.map(line).join("\n")}`
   if (name === "floor_task_done") {
     const bad = await needAgent();
     if (bad) return say(bad);
+    await readoptHolding();
     if (!here.task) return say("This terminal is not holding a task.");
     const passed = String(args.diff ?? "").trim();
     const diff = passed || await workDiff(here.repoRoot ?? here.cwd, here.task.sha);
@@ -42754,6 +42785,7 @@ Nothing has changed in this checkout, so the reviewer has nothing to read. If th
   if (name === "floor_task_review") {
     const bad = await needAgent();
     if (bad) return say(bad);
+    await readoptHolding();
     if (!here.task) return say("This terminal is not holding a review.");
     const verdict = args.verdict === "pass" ? "pass" : "changes";
     const { data, error: error2 } = await db.rpc("review_task", {
@@ -42831,6 +42863,11 @@ You are still holding this review, so it is not finished. Call floor_task_review
     const { data, error: error2 } = await db.rpc("skip_task", { p_task: id, p_agent: here.agentId });
     if (error2) return say(`Floor could not record that: ${error2.message}`);
     if (data?.ok === false) return say(`Floor refused: ${data.message ?? data.reason}`);
+    if (here.redirect?.id === id) {
+      await db.rpc("answer_redirect", { p_agent: here.agentId, p_yes: false });
+      here.redirect = null;
+      here.redirectAsked = null;
+    }
     return say(
       `Skipped. It stays on the list for somebody else and will not be offered here again.` + (here.offersQuiet ? " Nothing further will be offered this session." : "")
     );
@@ -42909,6 +42946,7 @@ Nothing happens until the current turn ends \u2014 a turn already running is not
   if (name === "floor_task_stuck") {
     const bad = await needAgent();
     if (bad) return say(bad);
+    await readoptHolding();
     if (!here.task) return say("This terminal is not holding a task.");
     const { data, error: error2 } = await db.rpc("stick_task", {
       p_task: here.task.id,
@@ -42927,6 +42965,7 @@ Nothing happens until the current turn ends \u2014 a turn already running is not
   if (name === "floor_task_split") {
     const bad = await needAgent();
     if (bad) return say(bad);
+    await readoptHolding();
     if (!here.task) return say("This terminal is not holding a task to split.");
     if (here.task.isReview) {
       return say(
@@ -42982,6 +43021,7 @@ You still hold "${here.task.title}", narrowed to the files you kept \u2014 carry
   if (name === "floor_task_handoff") {
     const bad = await needAgent();
     if (bad) return say(bad);
+    await readoptHolding();
     if (!here.task) return say("This terminal is not holding a task.");
     if (here.task.isReview) {
       return say(
