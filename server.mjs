@@ -39171,6 +39171,15 @@ function toControl(row, agentId, userId) {
       why: String(body.why ?? "").trim() || null
     };
   }
+  if (kind === "task" && body.what === "task.recalled" && forMe) {
+    return {
+      kind: "recalled",
+      taskId: body.taskId ?? null,
+      title: String(body.title ?? "").trim(),
+      by: String(body.by ?? "").trim() || null,
+      why: String(body.why ?? "").trim() || null
+    };
+  }
   if (kind === "direction" && row?.target_id === agentId) {
     return {
       kind: "direction",
@@ -39849,6 +39858,14 @@ var here = {
    * to consume itself.
    */
   helpAsked: null,
+  /**
+   * Taken off the task it holds, by somebody in the room. Unlike a redirect
+   * this needs no answer -- it starts nothing on this machine, it only ends
+   * something -- so there is no `recallOk`. What it does need is the handover,
+   * which only this agent can write.
+   */
+  recall: null,
+  recallAsked: null,
   autoSince: 0,
   /**
    * Why this run must stop, once something has gone wrong. Set when a task is
@@ -39987,6 +40004,15 @@ var here = {
    */
   coneFailedUntil: 0
 };
+function handoverOwed() {
+  if (!here.task) return null;
+  if (here.recall && here.recall.id === here.task.id) return here.recall.title;
+  if (here.redirect && !here.redirect.needsOk && here.redirect.id !== here.task.id) {
+    return here.task.title;
+  }
+  if (here.help && here.help.agreed && here.help.id !== here.task.id) return here.task.title;
+  return null;
+}
 var say = (text) => ({ content: [{ type: "text", text }] });
 var FENCE = "----- FLOOR DIRECTION -----";
 var PAUSE_HOLDS_MAX = 3;
@@ -40393,6 +40419,8 @@ async function leftRoom(reason) {
   here.splitAsked = null;
   here.help = null;
   here.helpAsked = null;
+  here.recall = null;
+  here.recallAsked = null;
   here.notices.length = 0;
   here.announce.length = 0;
   here.activity = null;
@@ -40911,9 +40939,11 @@ async function taskOffer(payload) {
     here.redirect = data?.redirect?.id ? data.redirect : null;
     here.split = data?.split?.taskId ? data.split : null;
     here.help = data?.help?.id ? data.help : null;
+    here.recall = data?.recall?.id ? data.recall : null;
     if (!here.redirect) here.redirectAsked = null;
     if (!here.split) here.splitAsked = null;
     if (!here.help) here.helpAsked = null;
+    if (!here.recall) here.recallAsked = null;
   }
   if (!error2) {
     if (here.task && data?.holding?.id !== here.task.id) {
@@ -40948,6 +40978,19 @@ The files in a part must not be files you keep, must not repeat between parts, a
 **If there is no such seam, say so with floor_split_no and a reason.** A refusal with an account of what is entangled is worth more than a split down a line that does not exist. What you must not do is ignore this \u2014 it is asked again at every turn end until it is answered one way or the other.
 
 Whichever you choose, you keep what you kept and carry on with it.`
+    };
+  }
+  if (here.task && here.recall && here.recall.id === here.task.id) {
+    if (payload.stop_hook_active === true) return null;
+    const rc = here.recall;
+    return {
+      systemMessage: `Floor \u2014 ${rc.by} took this terminal off "${rc.title}". Hand it over.`,
+      decision: "block",
+      reason: `${rc.by} has taken this terminal off "${rc.title}". This is not a question and there is nothing to agree to \u2014 you are off it.
+
+Stop where you are. Do not finish what you were doing, do not tidy up, and do not commit: whatever state it is in is the state it is handed over in, and unfinished is expected.
+
+Write the handover now with floor_task_handoff: what you actually did, the state you are leaving the tree in, what is left, and the very next thing you were about to do. Somebody else picks this up cold and that note is all they get \u2014 Floor parks your half-finished code on a branch for them by itself, so do not describe the diff.`
     };
   }
   if (here.task && here.redirect && !here.redirect.needsOk && here.redirect.id !== here.task.id) {
@@ -41344,6 +41387,12 @@ ${FENCE}
     if (!ours && (paths2.length || intent.unknown)) return halt(here.stopped);
     return allow(
       `${here.stopped} Nothing you write will be coordinated with that room until this terminal is in one again \u2014 /floor:join with an invite code, or /floor status to see where it thinks it is.`
+    );
+  }
+  const owed = handoverOwed();
+  if (owed && !ours && (paths2.length || intent.unknown)) {
+    return halt(
+      `Floor: this terminal owes a handover for "${owed}" and has agreed to give it up, so nothing else runs until that is written. Call floor_task_handoff now -- what you did, the state the tree is in, what is left, and what you were about to do next. It does not need to be finished. Do not read anything first: all four are your own account of your own work, and Floor parks the code for whoever picks it up.`
     );
   }
   if (here.repoRoot && !ours) {
